@@ -1,0 +1,489 @@
+// Package store is the SQLite-backed index: a per-file freshness manifest, the
+// chunk table (text + float32 embedding BLOB), and an FTS5 full-text mirror.
+// Vector search is brute-force cosine in Go; full-text is FTS5/BM25. There is
+// no cgo and no extension — pure modernc.org/sqlite.
+package store
+
+import (
+	"database/sql"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+
+	_ "modernc.org/sqlite"
+)
+
+type Store struct{ db *sql.DB }
+
+// DefaultPath is ~/.config/recall/index.db (created if missing).
+func DefaultPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".config", "recall")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "index.db"), nil
+}
+
+func Open(path string) (*Store, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1) // modernc: single writer, avoids lock churn
+	s := &Store{db: db}
+	if err := s.init(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) init() error {
+	stmts := []string{
+		`PRAGMA journal_mode=WAL;`,
+		`PRAGMA synchronous=NORMAL;`,
+		`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);`,
+		// embed_model records which embedding model produced this file's vectors,
+		// so a model switch can be reconciled per-file (see internal/index).
+		`CREATE TABLE IF NOT EXISTS files (
+			path TEXT PRIMARY KEY, source TEXT NOT NULL,
+			mtime_ns INTEGER NOT NULL, size INTEGER NOT NULL, indexed_at INTEGER NOT NULL,
+			embed_model TEXT);`,
+		// embed_model on each chunk lets the semantic path compare only vectors
+		// from one model — cosine across different model spaces is meaningless.
+		`CREATE TABLE IF NOT EXISTS chunks (
+			id INTEGER PRIMARY KEY,
+			file_path TEXT NOT NULL, source TEXT NOT NULL, session_id TEXT,
+			project TEXT, title TEXT, ts INTEGER, role TEXT, text TEXT NOT NULL,
+			embedding BLOB, embed_model TEXT);`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_ts ON chunks(ts);`,
+		// Every search is logged here (best-effort, non-optional). Feeds future
+		// analytics, real-usage eval sets, and "what did I search for" history.
+		`CREATE TABLE IF NOT EXISTS queries (
+			id INTEGER PRIMARY KEY,
+			ts INTEGER NOT NULL,          -- when the search ran (unix seconds)
+			query TEXT NOT NULL,
+			mode TEXT NOT NULL,           -- hybrid|semantic|lexical|all
+			source TEXT, project TEXT, since INTEGER, lim INTEGER,
+			model TEXT,                   -- embedding model used ('' for lexical/all)
+			n_results INTEGER NOT NULL,
+			top_sessions TEXT,            -- JSON array of "source/session_id", best first
+			duration_ms INTEGER);`,
+		`CREATE INDEX IF NOT EXISTS idx_queries_ts ON queries(ts);`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, content='chunks', content_rowid='id');`,
+		`CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+			INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text); END;`,
+		`CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+			INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text); END;`,
+	}
+	for _, q := range stmts {
+		if _, err := s.db.Exec(q); err != nil {
+			return fmt.Errorf("init: %w (%.60s)", err, q)
+		}
+	}
+	return s.migrate()
+}
+
+// migrate upgrades a pre-existing DB in place: adds the embed_model columns if
+// they are missing and backfills them from the legacy global meta.embed_model
+// (the single model the whole index was built with before per-row tracking).
+func (s *Store) migrate() error {
+	for _, c := range []struct{ table, col string }{
+		{"files", "embed_model"},
+		{"chunks", "embed_model"},
+	} {
+		if err := s.ensureColumn(c.table, c.col, "TEXT"); err != nil {
+			return err
+		}
+		// Backfill rows that predate the column from the old global value.
+		if _, err := s.db.Exec(`UPDATE `+c.table+` SET embed_model=
+			(SELECT value FROM meta WHERE key='embed_model')
+			WHERE embed_model IS NULL
+			  AND EXISTS(SELECT 1 FROM meta WHERE key='embed_model')`); err != nil {
+			return fmt.Errorf("backfill %s.%s: %w", c.table, c.col, err)
+		}
+	}
+	// Index now that the column is guaranteed to exist.
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_chunks_model ON chunks(embed_model)`)
+	return err
+}
+
+// ensureColumn adds a column to a table if it is not already present.
+func (s *Store) ensureColumn(table, col, decl string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == col {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + decl)
+	return err
+}
+
+// --- meta -------------------------------------------------------------------
+
+func (s *Store) GetMeta(key string) (string, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key=?`, key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return v, err
+}
+
+func (s *Store) SetMeta(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO meta(key,value) VALUES(?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	return err
+}
+
+// --- manifest ---------------------------------------------------------------
+
+type FileMeta struct {
+	MtimeNs    int64
+	Size       int64
+	EmbedModel string
+}
+
+func (s *Store) Manifest() (map[string]FileMeta, error) {
+	rows, err := s.db.Query(`SELECT path, mtime_ns, size, COALESCE(embed_model,'') FROM files`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[string]FileMeta{}
+	for rows.Next() {
+		var p string
+		var fm FileMeta
+		if err := rows.Scan(&p, &fm.MtimeNs, &fm.Size, &fm.EmbedModel); err != nil {
+			return nil, err
+		}
+		m[p] = fm
+	}
+	return m, rows.Err()
+}
+
+// --- writes -----------------------------------------------------------------
+
+type Chunk struct {
+	Source, SessionID, Project, Title, Role, Text string
+	Ts                                            int64
+	Embedding                                     []float32
+}
+
+// ReplaceFile atomically swaps all chunks for a file and updates its manifest
+// row. embedModel records the model that produced these chunks' embeddings, so
+// a later model switch can reconcile this file on its own (and the query path
+// can rank only same-model vectors).
+func (s *Store) ReplaceFile(path, source, embedModel string, mtimeNs, size, indexedAt int64, chunks []Chunk) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM chunks WHERE file_path=?`, path); err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO chunks
+		(file_path, source, session_id, project, title, ts, role, text, embedding, embed_model)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, c := range chunks {
+		if _, err := stmt.Exec(path, c.Source, c.SessionID, c.Project, c.Title,
+			c.Ts, c.Role, c.Text, encodeVec(c.Embedding), embedModel); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO files(path, source, mtime_ns, size, indexed_at, embed_model)
+		VALUES(?,?,?,?,?,?)
+		ON CONFLICT(path) DO UPDATE SET
+			source=excluded.source, mtime_ns=excluded.mtime_ns,
+			size=excluded.size, indexed_at=excluded.indexed_at,
+			embed_model=excluded.embed_model`,
+		path, source, mtimeNs, size, indexedAt, embedModel); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) DeleteFile(path string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM chunks WHERE file_path=?`, path); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM files WHERE path=?`, path); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// --- reads ------------------------------------------------------------------
+
+// Filter narrows the candidate set before ranking.
+type Filter struct {
+	Source  string
+	Project string
+	Since   int64
+}
+
+func (f Filter) where(prefix string) (string, []any) {
+	q := ""
+	var args []any
+	if f.Source != "" {
+		q += " AND " + prefix + "source=?"
+		args = append(args, f.Source)
+	}
+	if f.Project != "" {
+		q += " AND " + prefix + "project LIKE ?"
+		args = append(args, "%"+f.Project+"%")
+	}
+	if f.Since > 0 {
+		q += " AND " + prefix + "ts>=?"
+		args = append(args, f.Since)
+	}
+	return q, args
+}
+
+type Row struct {
+	ID                                            int64
+	Source, SessionID, Project, Title, Role, Text string
+	Path                                          string // transcript file on disk
+	Ts                                            int64
+	Embedding                                     []float32
+}
+
+// Candidates returns rows matching the filter, embeddings included (for cosine).
+// When embedModel is non-empty, only chunks embedded with that model are
+// returned — vectors from other models live in a different space and must not
+// be compared against the query vector.
+func (s *Store) Candidates(f Filter, embedModel string) ([]Row, error) {
+	where, args := f.where("")
+	if embedModel != "" {
+		where += " AND embed_model=?"
+		args = append(args, embedModel)
+	}
+	rows, err := s.db.Query(`SELECT id, source, session_id, project, title, ts, role, text, file_path, embedding
+		FROM chunks WHERE 1=1`+where, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Row
+	for rows.Next() {
+		var r Row
+		var emb []byte
+		if err := rows.Scan(&r.ID, &r.Source, &r.SessionID, &r.Project, &r.Title,
+			&r.Ts, &r.Role, &r.Text, &r.Path, &emb); err != nil {
+			return nil, err
+		}
+		r.Embedding = decodeVec(emb)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// Lexical returns rows matching an FTS5 query, best (lowest bm25) first.
+func (s *Store) Lexical(match string, f Filter, limit int) ([]Row, error) {
+	where, args := f.where("c.")
+	all := append([]any{match}, args...)
+	q := `SELECT c.id, c.source, c.session_id, c.project, c.title, c.ts, c.role, c.text, c.file_path
+		FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid
+		WHERE chunks_fts MATCH ?` + where + `
+		ORDER BY bm25(chunks_fts) LIMIT ?`
+	all = append(all, limit)
+	rows, err := s.db.Query(q, all...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Row
+	for rows.Next() {
+		var r Row
+		if err := rows.Scan(&r.ID, &r.Source, &r.SessionID, &r.Project, &r.Title,
+			&r.Ts, &r.Role, &r.Text, &r.Path); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// SessHit is the best-matching chunk for one session under a single FTS term.
+type SessHit struct {
+	Row   Row
+	Score float64 // -bm25, so higher is a better match
+}
+
+// SessionsMatching returns, for an FTS5 match expression, one entry per session
+// (keyed "source\x00session_id") that has at least one matching chunk — keeping
+// that session's best-scoring chunk. Used to build session-level AND queries.
+func (s *Store) SessionsMatching(match string, f Filter) (map[string]SessHit, error) {
+	where, args := f.where("c.")
+	all := append([]any{match}, args...)
+	q := `SELECT c.id, c.source, c.session_id, c.project, c.title, c.ts, c.role, c.text, c.file_path, bm25(chunks_fts) AS b
+		FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid
+		WHERE chunks_fts MATCH ?` + where + `
+		ORDER BY b` // best (most negative bm25) first
+	rows, err := s.db.Query(q, all...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]SessHit{}
+	for rows.Next() {
+		var r Row
+		var b float64
+		if err := rows.Scan(&r.ID, &r.Source, &r.SessionID, &r.Project, &r.Title,
+			&r.Ts, &r.Role, &r.Text, &r.Path, &b); err != nil {
+			return nil, err
+		}
+		key := r.Source + "\x00" + r.SessionID
+		if _, ok := out[key]; ok {
+			continue // already have this session's best chunk (rows are bm25-ordered)
+		}
+		out[key] = SessHit{Row: r, Score: -b}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) Counts() (files, chunks int, err error) {
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&files)
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM chunks`).Scan(&chunks)
+	return
+}
+
+// --- query log --------------------------------------------------------------
+
+// QueryLog is one recorded search. TopSessions holds "source/session_id"
+// strings, best match first.
+type QueryLog struct {
+	Ts          int64    `json:"ts"`
+	Query       string   `json:"query"`
+	Mode        string   `json:"mode"`
+	Source      string   `json:"source,omitempty"`
+	Project     string   `json:"project,omitempty"`
+	Since       int64    `json:"since,omitempty"`
+	Limit       int      `json:"limit"`
+	Model       string   `json:"model,omitempty"`
+	NResults    int      `json:"n_results"`
+	TopSessions []string `json:"top_sessions,omitempty"`
+	DurationMs  int64    `json:"duration_ms"`
+}
+
+// LogQuery records one search. Called best-effort; a logging error must never
+// fail the search, so callers should only warn on the returned error.
+func (s *Store) LogQuery(q QueryLog) error {
+	top, _ := json.Marshal(q.TopSessions)
+	_, err := s.db.Exec(`INSERT INTO queries
+		(ts, query, mode, source, project, since, lim, model, n_results, top_sessions, duration_ms)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		q.Ts, q.Query, q.Mode, q.Source, q.Project, q.Since, q.Limit, q.Model,
+		q.NResults, string(top), q.DurationMs)
+	return err
+}
+
+// RecentQueries returns the most recent logged searches, newest first.
+func (s *Store) RecentQueries(limit int) ([]QueryLog, error) {
+	rows, err := s.db.Query(`SELECT ts, query, mode, COALESCE(source,''), COALESCE(project,''),
+		COALESCE(since,0), COALESCE(lim,0), COALESCE(model,''), n_results,
+		COALESCE(top_sessions,''), COALESCE(duration_ms,0)
+		FROM queries ORDER BY ts DESC, id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []QueryLog
+	for rows.Next() {
+		var q QueryLog
+		var top string
+		if err := rows.Scan(&q.Ts, &q.Query, &q.Mode, &q.Source, &q.Project, &q.Since,
+			&q.Limit, &q.Model, &q.NResults, &top, &q.DurationMs); err != nil {
+			return nil, err
+		}
+		if top != "" {
+			_ = json.Unmarshal([]byte(top), &q.TopSessions)
+		}
+		out = append(out, q)
+	}
+	return out, rows.Err()
+}
+
+// ModelCounts reports how many files are indexed under each embedding model —
+// the answer to "how is the data currently indexed?".
+func (s *Store) ModelCounts() (map[string]int, error) {
+	rows, err := s.db.Query(`SELECT COALESCE(NULLIF(embed_model,''),'(unknown)'), COUNT(*)
+		FROM files GROUP BY 1 ORDER BY 2 DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var m string
+		var n int
+		if err := rows.Scan(&m, &n); err != nil {
+			return nil, err
+		}
+		out[m] = n
+	}
+	return out, rows.Err()
+}
+
+// FilesNotOnModel counts indexed files whose embeddings were produced by some
+// model other than the given one — i.e. sessions a semantic query for `model`
+// cannot rank until they are re-embedded.
+func (s *Store) FilesNotOnModel(model string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM files WHERE COALESCE(embed_model,'') <> ?`, model).Scan(&n)
+	return n, err
+}
+
+// --- vector codec -----------------------------------------------------------
+
+func encodeVec(v []float32) []byte {
+	b := make([]byte, len(v)*4)
+	for i, f := range v {
+		binary.LittleEndian.PutUint32(b[i*4:], math.Float32bits(f))
+	}
+	return b
+}
+
+func decodeVec(b []byte) []float32 {
+	v := make([]float32, len(b)/4)
+	for i := range v {
+		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return v
+}

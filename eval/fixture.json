@@ -1,0 +1,27 @@
+{
+  "_about": "Labeled retrieval eval for recall. Each item is a realistic natural-language query paraphrased from a known session's topic; `gold` lists session-id prefixes (8 hex) that are relevant. Authored by Claude from session metadata/snippets in the real index (2026-05-31) — single annotator, paraphrased to favor semantic over lexical recall. Limitations noted in docs/embedding-models.md.",
+  "queries": [
+    { "query": "building and installing the recall command-line search tool", "gold": ["4a4b4bfe", "0caa348c"] },
+    { "query": "pulling daily app usage statistics from a macOS system API", "gold": ["3281c292"] },
+    { "query": "fixing a rust cargo metadata failure when compiling for iOS", "gold": ["9b822ad0"] },
+    { "query": "adding a third-party books catalog API integration", "gold": ["cba8df10"] },
+    { "query": "transcribing a recorded video to text", "gold": ["e97736ce"] },
+    { "query": "creating a shell alias to switch to a project directory quickly", "gold": ["4f08427c"] },
+    { "query": "sharing the currently open web page from a browser extension into the desktop app", "gold": ["b2751cb0"] },
+    { "query": "broken homebrew formula upgrades and how we resolved them", "gold": ["14e02c32"] },
+    { "query": "switching which markdown editor opens by default", "gold": ["67203a52"] },
+    { "query": "where in the codebase do we call the gpt-4.1-nano model", "gold": ["334c3666"] },
+    { "query": "keeping cancelled to-do items visible on the today view", "gold": ["80b35018"] },
+    { "query": "why the voice assistant stays silent and how those errors get reported", "gold": ["51b52840"] },
+    { "query": "what downstream things break when we rename the api project", "gold": ["26aedbb0"] },
+    { "query": "looking into a rendering glitch with the checkmark glyph in the cli", "gold": ["f8bc8d99"] },
+    { "query": "reading web page content over native messaging from the daemon", "gold": ["27b3dc41"] },
+    { "query": "does the tasks API let you filter by several ids in one request", "gold": ["77a8b8e3"] },
+    { "query": "support for repeating or recurring tasks in the task app", "gold": ["019e3bf3"] },
+    { "query": "archiving a chat conversation and whether that is supported", "gold": ["0e3de846", "2f61c9c3"] },
+    { "query": "checking the nvm node version alias inside the shell rc files", "gold": ["73a697bf", "2a345c72"] },
+    { "query": "creating agents across all the sub-projects", "gold": ["8055797b"] },
+    { "query": "reviewing sidebar spaces section for font consistency", "gold": ["244aabb3", "6b44c5f9"] },
+    { "query": "checking whether a github repository is already cloned locally", "gold": ["230d1d3f"] }
+  ]
+}

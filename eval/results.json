@@ -1,0 +1,50 @@
+[
+  {
+    "model": "bge-m3",
+    "mode": "semantic",
+    "n": 22,
+    "recall@1": 0.7272727272727273,
+    "recall@5": 0.9090909090909091,
+    "recall@10": 0.9545454545454546,
+    "mrr": 0.7931818181818182,
+    "p50_latency_ms": 250.35797944292426,
+    "misses": [
+      "broken homebrew formula upgrades and how we resolved them"
+    ]
+  },
+  {
+    "model": "qwen3-0.6b",
+    "mode": "semantic",
+    "n": 22,
+    "recall@1": 0.8181818181818182,
+    "recall@5": 0.9090909090909091,
+    "recall@10": 0.9545454545454546,
+    "mrr": 0.8686868686868687,
+    "p50_latency_ms": 241.4351045154035,
+    "misses": [
+      "broken homebrew formula upgrades and how we resolved them"
+    ]
+  },
+  {
+    "model": "bge-m3",
+    "mode": "hybrid",
+    "n": 22,
+    "recall@1": 0.7272727272727273,
+    "recall@5": 0.9090909090909091,
+    "recall@10": 0.9545454545454546,
+    "mrr": 0.8077894327894328,
+    "p50_latency_ms": 299.5464170817286,
+    "misses": []
+  },
+  {
+    "model": "qwen3-0.6b",
+    "mode": "hybrid",
+    "n": 22,
+    "recall@1": 0.7727272727272727,
+    "recall@5": 0.9090909090909091,
+    "recall@10": 0.9545454545454546,
+    "mrr": 0.8252331002331003,
+    "p50_latency_ms": 274.8802504502237,
+    "misses": []
+  }
+]

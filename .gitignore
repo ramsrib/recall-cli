@@ -1,0 +1,19 @@
+# Compiled binary (built via `go build -o recall .`)
+/recall
+recall
+
+# Go build/test artifacts
+*.exe
+*.test
+*.out
+/dist/
+
+# Local index data (lives in ~/.config/recall, but ignore if ever built here)
+*.db
+*.db-shm
+*.db-wal
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
