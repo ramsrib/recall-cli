@@ -41,6 +41,14 @@ func Discover() ([]SessionFile, error) {
 		if err != nil {
 			return nil
 		}
+		// Sub-agent transcripts live under `<session-id>/subagents/agent-*.jsonl`
+		// and carry the PARENT session's id. Listing them produces duplicate
+		// session rows (one per sub-agent), which is noise and breaks the app's
+		// list (duplicate identities → blank gaps). They belong to the parent
+		// session, so skip the whole subtree.
+		if d.IsDir() && d.Name() == "subagents" {
+			return fs.SkipDir
+		}
 		if !d.IsDir() && strings.HasSuffix(path, ".jsonl") {
 			out = append(out, SessionFile{Path: path, Source: "claude"})
 		}

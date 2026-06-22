@@ -103,6 +103,11 @@ func Run(st *store.Store, em *embed.Client, now int64, log func(string)) (Stats,
 			stats.Deleted++
 		}
 	}
+
+	// Keep the sessions registry (what `recall list` reads) in sync with disk.
+	if err := RefreshSessions(st); err != nil {
+		log(fmt.Sprintf("session registry refresh failed: %v", err))
+	}
 	return stats, nil
 }
 

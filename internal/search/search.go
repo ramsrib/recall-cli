@@ -13,9 +13,26 @@ import (
 	"strings"
 	"unicode"
 
+	"recall/internal/adapter"
 	"recall/internal/embed"
 	"recall/internal/store"
 )
+
+// keepSession reports whether a session passes the non-SQL filters (currently
+// just the interactive/exec mode gate). Memoized by the caller to read each
+// transcript header at most once per search.
+func keepSession(f store.Filter, r store.Row, cache map[string]bool) bool {
+	if !f.ExcludeExec {
+		return true
+	}
+	key := r.Source + "\x00" + r.SessionID
+	if v, ok := cache[key]; ok {
+		return v
+	}
+	keep := adapter.Mode(r.Path, r.Source) != "exec"
+	cache[key] = keep
+	return keep
+}
 
 type Mode string
 
@@ -123,9 +140,12 @@ func Run(st *store.Store, em *embed.Client, query string, mode Mode, f store.Fil
 		order = sortedByScore(score)
 	}
 
-	// Collapse to best chunk per session, capped to a rerank window.
+	// Collapse to best chunk per session, capped to a rerank window. Mode
+	// exclusion happens here — before the window/limit — so excluding exec
+	// sessions never shrinks the result count below what's available.
 	const rerankWindow = 50
 	seen := map[string]bool{}
+	modeCache := map[string]bool{}
 	var top []store.Row
 	for _, id := range order {
 		r := rowByID[id]
@@ -134,6 +154,9 @@ func Run(st *store.Store, em *embed.Client, query string, mode Mode, f store.Fil
 			continue
 		}
 		seen[key] = true
+		if !keepSession(f, r, modeCache) {
+			continue
+		}
 		top = append(top, r)
 		if len(top) >= rerankWindow {
 			break
@@ -225,8 +248,12 @@ func RunAll(st *store.Store, query string, f store.Filter, limit int) ([]Result,
 	})
 
 	results := make([]Result, 0, limit)
+	modeCache := map[string]bool{}
 	for _, a := range list {
 		r := a.row
+		if !keepSession(f, r, modeCache) {
+			continue
+		}
 		results = append(results, Result{
 			Source: r.Source, SessionID: r.SessionID, Project: r.Project,
 			Title: r.Title, Role: r.Role, Ts: r.Ts, Path: r.Path, Score: a.total,

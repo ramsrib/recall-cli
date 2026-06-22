@@ -34,6 +34,16 @@ func main() {
 		runIndex(os.Args[2:])
 	case "log":
 		runLog(os.Args[2:])
+	case "list":
+		runList(os.Args[2:])
+	case "pin":
+		runPin(os.Args[2:], true)
+	case "unpin":
+		runPin(os.Args[2:], false)
+	case "summary":
+		runSummary(os.Args[2:])
+	case "resume":
+		runResume(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -48,9 +58,20 @@ Usage:
   recall index [--model NAME]
   recall "QUERY" [--mode hybrid|semantic|lexical] [--source claude|codex]
                  [--project SUBSTR] [--since YYYY-MM-DD] [--limit N]
-                 [--model NAME] [--pretty]
+                 [--model NAME] [--include-exec] [--pretty]
+                 (non-interactive exec/headless sessions are hidden unless --include-exec)
   recall "A B C" --all          sessions containing ALL keywords (anywhere)
   recall log [--limit N] [--pretty]            recent searches (every query is logged)
+
+Session manager (companion to the Recall App):
+  recall list [--source S] [--project P] [--since D] [--limit N]
+              [--mode interactive|exec|all] [--pretty]
+                                one row per session (+ pin/summary state);
+                                hides non-interactive exec runs unless --mode
+  recall pin <session-id>       pin a session     (recall unpin <id> to remove)
+  recall summary <session-id> [--refresh] [--model NAME] [--pretty]
+                                concise overview via codex, cached per session
+  recall resume <session-id>    print the resume command + cwd for a session
 
 Models:
   index --model NAME re-embeds only files not already on NAME (incremental).
@@ -102,6 +123,7 @@ func runSearch(args []string) {
 	all := fs.Bool("all", false, "require ALL keywords somewhere in the session (lexical, session-level AND)")
 	pretty := fs.Bool("pretty", false, "human-readable table (default output is compact JSON)")
 	model := fs.String("model", "", "embedding model for semantic ranking (default: the index's current model)")
+	includeExec := fs.Bool("include-exec", false, "include non-interactive `codex exec`/headless sessions (hidden by default)")
 
 	// Allow flags before OR after the query: split positional from flag tokens.
 	flagArgs, pos := splitArgs(args)
@@ -115,7 +137,7 @@ func runSearch(args []string) {
 	st := openStore()
 	defer st.Close()
 
-	f := store.Filter{Source: *source, Project: *project, Since: parseSince(*since)}
+	f := store.Filter{Source: *source, Project: *project, Since: parseSince(*since), ExcludeExec: !*includeExec}
 	var results []search.Result
 	var err error
 	usedMode, usedModel := *mode, ""
@@ -246,7 +268,12 @@ func warnExcluded(st *store.Store, model string) {
 // splitArgs separates flag tokens (and their values) from positional query words,
 // so flags may appear before or after the query.
 func splitArgs(args []string) (flags, pos []string) {
-	boolFlags := map[string]bool{"--pretty": true, "-pretty": true, "--all": true, "-all": true}
+	boolFlags := map[string]bool{
+		"--pretty": true, "-pretty": true, "--all": true, "-all": true,
+		"--refresh": true, "-refresh": true,
+		"--include-exec": true, "-include-exec": true,
+		"--cached-only": true, "-cached-only": true,
+	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if strings.HasPrefix(a, "-") && a != "-" {
