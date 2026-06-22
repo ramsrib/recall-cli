@@ -49,7 +49,10 @@ func Discover() ([]SessionFile, error) {
 		if d.IsDir() && d.Name() == "subagents" {
 			return fs.SkipDir
 		}
-		if !d.IsDir() && strings.HasSuffix(path, ".jsonl") {
+		// Skip non-transcript sidecars that happen to end in .jsonl — e.g.
+		// `<session-id>.mentes.jsonl`, an append-log of Mentes task ids touched
+		// during the session. Listing them would create bogus session rows.
+		if !d.IsDir() && strings.HasSuffix(path, ".jsonl") && !strings.HasSuffix(path, ".mentes.jsonl") {
 			out = append(out, SessionFile{Path: path, Source: "claude"})
 		}
 		return nil
