@@ -192,17 +192,18 @@ func resumeCommand(source, id string) string {
 // --- recall summary ---------------------------------------------------------
 
 const summaryPrompt = `You are summarizing a Claude Code / Codex coding-session transcript provided on stdin.
-Goal: help me quickly decide if this is the session I'm looking for and recall what happened — without re-reading it.
-Output PLAIN TEXT in exactly this shape (no markdown headers, no preamble):
+Goal: let me (a) recognize whether this is the session I want and (b) recall what was found/decided and what's left to do — WITHOUT re-reading it. Favor concrete outcomes, decisions, and findings over a table of contents.
 
-Gist: <one sentence capturing the session in a nutshell>
-Topics:
-- <distinct thing worked on>
-- <…3 to 8 bullets, each a few words>
-Started: <what the first real request was>
-Ended: <the state at the end / last thing done>
+Output PLAIN TEXT in exactly this shape (no markdown, no preamble, keep the labels):
 
-Be terse and concrete. Do NOT run any commands or tools — just read and summarize.`
+Gist: <one sentence — the bottom line of the session>
+Key points:
+- <a concrete finding, decision, answer, or change — a full clause with specifics (the root cause, the number, the choice made, the file/service); NOT a topic heading>
+- <3 to 6 bullets; fold in artifacts produced — docs, PRs, tasks, key files/commands>
+Outcome: <where it ended — solved / shipped / blocked / self-resolved — and the bottom-line state>
+Next: <unresolved items, pending decisions, or follow-ups, with any deadline; write a single — if nothing is left to do>
+
+Rules: prefer concrete nouns (file paths, IDs, services, numbers) over vague phrasing; each Key point must say what was learned or done, not merely the subject. Be terse. Do NOT run any commands or tools — just read and summarize.`
 
 func runSummary(args []string) {
 	fs := flag.NewFlagSet("summary", flag.ExitOnError)
