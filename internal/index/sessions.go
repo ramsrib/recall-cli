@@ -3,8 +3,8 @@ package index
 import (
 	"os"
 
-	"recall/internal/adapter"
-	"recall/internal/store"
+	"github.com/ramsrib/recall-cli/internal/adapter"
+	"github.com/ramsrib/recall-cli/internal/store"
 )
 
 // RefreshSessions reconciles the `sessions` registry with disk: it discovers all

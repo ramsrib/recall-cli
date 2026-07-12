@@ -4,7 +4,10 @@ GO      ?= go
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build install uninstall clean fmt vet tidy
+.PHONY: help build install uninstall release clean fmt vet tidy
+
+# recall is pure Go (modernc sqlite, no cgo), so it cross-compiles cleanly.
+PLATFORMS ?= darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -26,8 +29,11 @@ install: build ## Build and install to ~/.local/bin (override with BINDIR=...)
 uninstall: ## Remove the installed binary
 	@rm -f "$(BINDIR)/$(BINARY)" && echo "removed → $(BINDIR)/$(BINARY)"
 
-clean: ## Remove the locally built binary
-	@rm -f "$(BINARY)"
+release: ## Cross-compile, package, tag, and publish (make release VERSION=v0.1.0)
+	@BINARY="$(BINARY)" VERSION="$(VERSION)" PLATFORMS="$(PLATFORMS)" ./scripts/release.sh
+
+clean: ## Remove the locally built binary and release artifacts
+	@rm -rf "$(BINARY)" dist
 
 fmt: ## gofmt the tree
 	$(GO) fmt ./...

@@ -1,4 +1,4 @@
-module recall
+module github.com/ramsrib/recall-cli
 
 go 1.26.3
 

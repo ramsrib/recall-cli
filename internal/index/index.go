@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"recall/internal/adapter"
-	"recall/internal/embed"
-	"recall/internal/store"
+	"github.com/ramsrib/recall-cli/internal/adapter"
+	"github.com/ramsrib/recall-cli/internal/embed"
+	"github.com/ramsrib/recall-cli/internal/store"
 )
 
 // maxChunkRunes ~ 512 tokens. Both supported models handle ≥8k, so this is comfortably safe.

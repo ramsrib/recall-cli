@@ -29,9 +29,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"recall/internal/adapter"
-	"recall/internal/index"
-	"recall/internal/store"
+	"github.com/ramsrib/recall-cli/internal/adapter"
+	"github.com/ramsrib/recall-cli/internal/index"
+	"github.com/ramsrib/recall-cli/internal/store"
 )
 
 // --- recall list ------------------------------------------------------------

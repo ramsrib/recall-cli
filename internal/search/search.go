@@ -13,9 +13,9 @@ import (
 	"strings"
 	"unicode"
 
-	"recall/internal/adapter"
-	"recall/internal/embed"
-	"recall/internal/store"
+	"github.com/ramsrib/recall-cli/internal/adapter"
+	"github.com/ramsrib/recall-cli/internal/embed"
+	"github.com/ramsrib/recall-cli/internal/store"
 )
 
 // keepSession reports whether a session passes the non-SQL filters (currently

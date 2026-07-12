@@ -26,11 +26,15 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"recall/internal/embed"
-	"recall/internal/index"
-	"recall/internal/search"
-	"recall/internal/store"
+	"github.com/ramsrib/recall-cli/internal/embed"
+	"github.com/ramsrib/recall-cli/internal/index"
+	"github.com/ramsrib/recall-cli/internal/search"
+	"github.com/ramsrib/recall-cli/internal/store"
 )
+
+// Set at release time via -ldflags "-X main.version=...". Stays "dev" for
+// builds made straight from the tree.
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -38,6 +42,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "-v", "--version", "version":
+		fmt.Println("recall", version)
 	case "index":
 		runIndex(os.Args[2:])
 	case "log":
