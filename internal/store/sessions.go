@@ -6,9 +6,9 @@ import (
 )
 
 // SessionMeta is one row in the session list, read from the sessions registry
-// (one row per session file) joined with pin and summary state. This is what
-// powers the app's manager list (and `recall list`); it no longer aggregates
-// the chunk search index.
+// (one row per session file) joined with pin and summary state. It backs
+// `recall list` — and, through it, any GUI client's session list. It no longer
+// aggregates the chunk search index, so listing sessions never needs a reindex.
 type SessionMeta struct {
 	Source     string `json:"source"`
 	SessionID  string `json:"session_id"`

@@ -3,7 +3,12 @@
 // The model is configurable (default qwen3-embedding:0.6b). Embedding dimension is whatever
 // the model returns — nothing here assumes a fixed size, so swapping models
 // only requires a reindex. A future reranker (e.g. bge-reranker-v2-m3) would
-// slot in as a separate stage after retrieval; see internal/rerank.
+// slot in as a separate stage after retrieval, behind the search.Reranker
+// interface in internal/search.
+//
+// Network note: this talks to OLLAMA_HOST, which defaults to localhost but is a
+// plain env var. If it is set to a remote server, every document chunk and every
+// search query is sent there.
 package embed
 
 import (

@@ -15,7 +15,7 @@ tracking*). This doc compares the two candidates and records what we'd need to p
 > full corpus, each with its own recommended prompt recipe. **`qwen3-embedding:0.6b` ranks the
 > right session first more often** (Recall@1 0.82 vs 0.73, MRR 0.87 vs 0.79 semantic) at **~2×
 > the indexing cost** and comparable query latency. Both find the answer within the top 5 equally
-> often. See [Results](#results-2026-05-31). N is small — treat the edge as suggestive, not proven.
+> often. See [Results](#results). N is small — treat the edge as suggestive, not proven.
 
 ## TL;DR
 
@@ -27,7 +27,7 @@ tracking*). This doc compares the two candidates and records what we'd need to p
 - **Measured verdict:** on our own data `qwen3-embedding:0.6b` wins on top-1 precision and MRR in
   both modes; the two tie on Recall@5/@10. It costs ~2× the indexing time (one-time / incremental)
   but is a smaller model on disk and queries just as fast. **Switched the default — but N is small,
-  so confirm with a larger eval.** Numbers and method in [Results](#results-2026-05-31).
+  so confirm with a larger eval.** Numbers and method in [Results](#results).
 
 ## Comparison
 
@@ -46,7 +46,7 @@ tracking*). This doc compares the two candidates and records what we'd need to p
 | Pulls cleanly in Ollama | `ollama pull bge-m3` | `ollama pull qwen3-embedding:0.6b` |
 
 ¹ recall only uses the **dense** vector from bge-m3; its sparse/ColBERT modes aren't wired up.
-² Measured on a 22-query labeled set over the full corpus (2026-05-31) — see [Results](#results-2026-05-31).
+² Measured on a 22-query labeled set over the full corpus (2026-05-31) — see [Results](#results).
 
 ### Why the dims matching matters here
 
@@ -60,31 +60,34 @@ but also inflate the index and slow every brute-force scan proportionally. For r
 local-first, no-ANN design, **staying at 1024 dims is the constraint that makes `0.6b` the right
 size class to compare against bge-m3** — not the bigger Qwen variants.
 
-## ⚠️ Fairness caveat: recall's prefixes are tuned for bge/nomic
+## Prompt conditioning is model-aware (this was the fairness blocker)
 
-`internal/embed/ollama.go` hardcodes:
+The two model families want different asymmetric-retrieval recipes, and using the wrong one
+measurably hurts:
 
-```go
-docPrefix   = "search_document: "
-queryPrefix = "search_query: "
-```
+| Family | Documents | Queries |
+|---|---|---|
+| bge / nomic | `"search_document: " + text` | `"search_query: " + text` |
+| Qwen3-Embedding | **bare** — no prefix | `"Instruct: <task>\nQuery: " + text` |
 
-These are the **bge/nomic** asymmetric-retrieval convention. Qwen3-Embedding expects a different
-recipe: **no prefix on documents**, and an **instruction** prepended to queries
-(`Instruct: <task description>\nQuery: <text>`). Qwen reports a few-percent retrieval gain from
-using the instruction format.
+An earlier version of recall hardcoded the bge prefixes for every model, which would have
+under-sold qwen3 in any head-to-head. **That is fixed:** `internal/embed/ollama.go` now picks
+the recipe per model (`docInput` / `queryInput`, keyed off `Client.Model`), so each model is
+embedded and queried with its own convention.
 
-So a head-to-head today would **under-sell qwen3** — it'd be embedding with the wrong prompt
-convention. A fair comparison must make the prefix/instruction scheme **model-aware** first (e.g. a
-per-model strategy keyed off `Client.Model`). That work is part of the TODO below.
+The results below were produced **after** that fix — each model got its own recipe. Any claim
+elsewhere in this doc's history that model-aware prompting is "still TODO" is obsolete.
+
+Still open: bge-m3 doesn't strictly *need* its prefixes, and nobody has tested whether it does
+better without them. See [What would make this conclusive](#what-would-make-this-conclusive).
 
 ---
 
-## Smoke test (2026-05-31): mechanics verified
+## Smoke test: mechanics verified
 
-Indexed a single session under `qwen3-embedding:0.6b` in an isolated `$HOME` (real index
-untouched) to confirm the per-model tracking added in `internal/{store,index,search}` actually
-works with this model. **This validated plumbing, not retrieval quality.**
+Before the eval, a single session was indexed under `qwen3-embedding:0.6b` in an isolated
+`$HOME` to confirm the per-model tracking in `internal/{store,index,search}` actually works
+with this model. **This validated plumbing, not retrieval quality.**
 
 | Check | Result |
 |---|---|
@@ -94,19 +97,26 @@ works with this model. **This validated plumbing, not retrieval quality.**
 | Query-time gating | querying with `--model bge-m3` against a qwen3-only index → **0 results + exclusion note** |
 | Incremental switch | re-index same model → *skipped*; switch model → *1 re-embedded (model change)* |
 
-What this does **not** tell us: whether qwen3 *ranks better* than bge-m3 on real queries. That
-needs the labeled eval below. Note also the smoke test embedded qwen3 with the bge-style
-`search_query:` prefix (the current code), i.e. the unfair convention flagged above.
+This says nothing about whether qwen3 *ranks better* than bge-m3 on real queries. That needs
+the labeled eval below. (The smoke test predates the model-aware conditioning fix, so it
+embedded qwen3 with the bge-style prefix — irrelevant for a plumbing check, but it means the
+cosine numbers above aren't qwen3 at its best.)
 
 ---
 
-## Results (2026-05-31)
+## Results
 
-Both models indexed over the **full corpus** (~11.3k chunks / ~213 sessions), each embedded with
-**its own recommended recipe** (bge: `search_document:`/`search_query:` prefixes; qwen3: bare
-documents + `Instruct:` queries — implemented in `internal/embed/ollama.go`). Evaluated on a
-**22-query labeled set** ([`eval/fixture.json`](../eval/fixture.json)) of natural-language queries
-paraphrased from known sessions; a query "hits" if a gold session lands in the top *k*.
+> **These numbers are not independently reproducible.** They were measured on a private
+> transcript corpus, and `eval/fixture.json`'s gold answers are session ids from it. The
+> method is reusable; the scores are a documented decision, not a public benchmark. See
+> [Reproduce](#reproduce).
+
+Both models indexed over the same corpus — on the order of **10k chunks across a couple of
+hundred sessions** — each embedded with **its own recommended recipe** (bge:
+`search_document:`/`search_query:` prefixes; qwen3: bare documents + `Instruct:` queries).
+Evaluated on a **22-query labeled set** ([`eval/fixture.json`](../eval/fixture.json)) of
+natural-language queries paraphrased from known sessions; a query "hits" if a gold session
+lands in the top *k*.
 
 ### Retrieval quality
 
@@ -129,7 +139,7 @@ paraphrased from known sessions; a query "hits" if a gold session lands in the t
 | | bge-m3 | qwen3-embedding:0.6b |
 |---|---|---|
 | Index throughput (256-chunk batch, warm) | ~9.7 chunks/s | ~4.9 chunks/s (**~2× slower**) |
-| Full-corpus re-embed (~11.3k chunks) | — | ~21 min |
+| Full re-embed of the eval corpus (~10k chunks) | — | ~21 min |
 | Query latency (p50, embed + brute-force cosine) | ~250–300 ms | ~240–275 ms (comparable) |
 | Model size on disk | 1.2 GB | 639 MB |
 | Index size | identical — both 1024-dim float32 | identical |
@@ -140,26 +150,41 @@ Indexing is the only place qwen3 costs more, and it's one-time / incremental (pe
 
 ### Recommendation — adopted
 
-**Switched the default to `qwen3-embedding:0.6b`** (2026-05-31): `embed.DefaultModel` changed in
-`internal/embed/ollama.go`, README/DESIGN updated, live index re-embedded under qwen3. It ranks
-better where it matters for both an agent and a human (the *first* result), queries just as fast,
-and is a smaller model on disk; the only cost is a slower one-time re-index. **Caveat: N=22 is
-small** — the R@1 gap is 2 flipped queries — so this is a directional result consistent with public
-benchmarks, not a proven one. Revisit with a larger eval (below). To go back: `--model bge-m3`.
+**`qwen3-embedding:0.6b` is the default** (`embed.DefaultModel` in
+`internal/embed/ollama.go`). It ranks better where it matters for both an agent and a human
+(the *first* result), queries just as fast, and is a smaller model on disk; the only cost is a
+slower one-time re-index. **Caveat: N=22 is small** — the R@1 gap is 2 flipped queries — so this
+is a directional result consistent with public benchmarks, not a proven one. Revisit with a
+larger eval (below). To go back: `--model bge-m3`.
 
 ### Reproduce
 
+⚠️ **You cannot reproduce the scores above, and neither can anyone but the original author.**
+The gold answers in `eval/fixture.json` are session-id prefixes from a *private* transcript
+corpus. `eval/run.py` scores a query by checking whether one of those ids appears in the ranked
+results — against your index, none of them exist, so every query scores zero. This is a
+structural property of the fixture, not a bug.
+
+What *is* reusable is the method. To run the same comparison on **your own** corpus:
+
 ```sh
-# 1. Index each model over the same corpus (separate $HOME → separate index DB).
-#    The live index is qwen3 now; build a bge-m3 copy under a throwaway HOME instead.
+# 1. Replace eval/fixture.json with your own queries + gold session ids.
+#    Get ids from your index:  recall "<a topic you remember>" --pretty
+#    Each entry: { "query": "...", "gold": ["<8-hex session-id prefix>", ...] }
+
+# 2. Index each model over the same corpus (separate $HOME → separate index DB).
+#    Your live index is presumably qwen3; build a bge-m3 copy under a throwaway HOME.
 EVAL=/tmp/recall-bge; mkdir -p "$EVAL"
 ln -s ~/.claude "$EVAL/.claude"; ln -s ~/.codex "$EVAL/.codex"
 HOME="$EVAL" recall index --model bge-m3
 
-# 2. Run the eval (Recall@k, MRR, p50 latency) across both.
-#    --qwen-home is the live index (now qwen3); --bge-home is the throwaway bge copy.
+# 3. Run the eval (Recall@k, MRR, p50 latency) across both.
 python3 eval/run.py --bge-home "$EVAL" --qwen-home "$HOME" --modes semantic hybrid
 ```
+
+A genuinely public benchmark would need a shareable corpus of transcripts. There isn't one, and
+building it is real work — which is exactly why the numbers above should be read as "the author
+checked, on their data" rather than as a result you should trust on faith.
 
 ### What would make this conclusive
 

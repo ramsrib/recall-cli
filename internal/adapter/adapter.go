@@ -49,9 +49,11 @@ func Discover() ([]SessionFile, error) {
 		if d.IsDir() && d.Name() == "subagents" {
 			return fs.SkipDir
 		}
-		// Skip non-transcript sidecars that happen to end in .jsonl — e.g.
-		// `<session-id>.mentes.jsonl`, an append-log of Mentes task ids touched
-		// during the session. Listing them would create bogus session rows.
+		// A Claude transcript is `<session-uuid>.jsonl`. Third-party tools may drop
+		// sidecar files beside it that share the session's basename and add their
+		// own suffix (`<session-uuid>.<tool>.jsonl`) — side-channel logs, not
+		// transcripts. They parse to nothing and would create bogus session rows, so
+		// skip them. Extend the guard below for any other sidecar suffix you hit.
 		if !d.IsDir() && strings.HasSuffix(path, ".jsonl") && !strings.HasSuffix(path, ".mentes.jsonl") {
 			out = append(out, SessionFile{Path: path, Source: "claude"})
 		}

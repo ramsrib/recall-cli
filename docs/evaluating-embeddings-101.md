@@ -250,9 +250,16 @@ Putting it all together — the moving parts:
 Two details that make it trustworthy:
 
 1. **Same corpus, two separate indexes.** We embedded *the exact same sessions* once with each model
-   into two separate databases. recall's design only lets one model live in an index at a time, so
-   we built the qwen3 index under a throwaway `$HOME` (with symlinks back to the real session files)
-   — that way the real index was never disturbed and both indexes covered identical content.
+   into two separate databases, built under separate `$HOME`s (with symlinks back to the same
+   session files) — that way both indexes covered identical content and neither disturbed the other.
+
+   > A single index *can* hold more than one model: recall records `embed_model` per file and per
+   > chunk, so a model switch is an incremental, per-file migration and a half-finished one leaves a
+   > legitimately mixed index. What it will not do is *compare across* models — cosine distance
+   > between two models' vector spaces is meaningless, so a semantic query only ranks chunks
+   > embedded with the query's model, and warns you about the rest. Separate DBs are still the
+   > cleaner setup for an eval (each run sees the whole corpus, no exclusions), which is why we
+   > used them here.
 2. **It drives the real `recall` binary**, not a reimplementation. The eval measures what you'd
    actually experience, including the hybrid/semantic ranking logic.
 
@@ -266,7 +273,7 @@ We ran it in two **modes** (see the main README for what these mean):
 
 ## 8. How to read our actual results
 
-From [`embedding-models.md`](./embedding-models.md#results-2026-05-31):
+From [`embedding-models.md`](./embedding-models.md#results):
 
 | model | mode | Recall@1 | Recall@5 | Recall@10 | MRR |
 |---|---|---|---|---|---|

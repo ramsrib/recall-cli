@@ -1,9 +1,19 @@
-// Session-management commands that make recall a companion to the Recall App:
+// Session-management commands. They round out the CLI on their own, and they are
+// also the API that the recall-app desktop client is built on
+// (https://github.com/ramsrib/recall-app):
 //
 //	recall list                 one row per session (+ pin/summary state)
 //	recall pin / unpin <id>     manage pinned sessions
 //	recall summary <id>         concise per-session overview (via codex), cached
 //	recall resume <id>          emit the resume command + cwd for a session
+//
+// Two of these reach outside the process, and both are deliberate:
+//
+//   - `summary` pipes transcript text into `codex exec` (network-backed). It is the
+//     only command in recall that sends conversation content off the machine.
+//   - `resume` PRINTS a resume command that carries --dangerously-skip-permissions
+//     (Claude) or --dangerously-bypass-approvals-and-sandbox (Codex). It never
+//     executes it; running it is the caller's explicit choice.
 package main
 
 import (

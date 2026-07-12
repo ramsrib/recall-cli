@@ -2,10 +2,18 @@
 //
 //	recall index                                   reindex changed sessions (both tools)
 //	recall "how did I fix pyexpat" [flags]         search
+//	recall log                                     recent searches
+//
+// Session-manager commands (list, pin, unpin, summary, resume) live in sessions_cmd.go.
 //
 // Search flags: --mode hybrid|semantic|lexical  --source claude|codex
 //               --project SUBSTR  --since YYYY-MM-DD  --limit N  --model NAME
-//               --all  --pretty
+//               --all  --include-exec  --pretty
+//
+// Indexing and search are local: embeddings come from Ollama on OLLAMA_HOST
+// (localhost by default). The two ways content leaves the machine are `recall
+// summary`, which pipes transcript text to `codex exec`, and a non-local
+// OLLAMA_HOST. See the README's "Privacy & network behavior".
 package main
 
 import (
@@ -63,15 +71,21 @@ Usage:
   recall "A B C" --all          sessions containing ALL keywords (anywhere)
   recall log [--limit N] [--pretty]            recent searches (every query is logged)
 
-Session manager (companion to the Recall App):
+Session manager (also powers the recall-app desktop client):
   recall list [--source S] [--project P] [--since D] [--limit N]
               [--mode interactive|exec|all] [--pretty]
                                 one row per session (+ pin/summary state);
                                 hides non-interactive exec runs unless --mode
   recall pin <session-id>       pin a session     (recall unpin <id> to remove)
-  recall summary <session-id> [--refresh] [--model NAME] [--pretty]
-                                concise overview via codex, cached per session
-  recall resume <session-id>    print the resume command + cwd for a session
+  recall summary <session-id> [--refresh] [--cached-only] [--model NAME] [--pretty]
+                                concise overview via codex, cached per session.
+                                SENDS TRANSCRIPT TEXT to codex exec (network) —
+                                the only command that leaves the machine. Needs an
+                                installed + authenticated codex CLI.
+  recall resume <session-id>    PRINT (never run) the resume command + cwd. The
+                                command it prints disables the agent's safety
+                                rails (--dangerously-skip-permissions /
+                                --dangerously-bypass-approvals-and-sandbox).
 
 Models:
   index --model NAME re-embeds only files not already on NAME (incremental).

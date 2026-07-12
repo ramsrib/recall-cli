@@ -50,10 +50,10 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) init() error {
 	stmts := []string{
 		// Wait up to 5s for a held lock instead of failing immediately. Without
-		// this, two `recall` processes opening the DB at once (e.g. the Recall App
-		// firing a refresh while another recall runs) collide on the exclusive
-		// lock `journal_mode=WAL` needs → SQLITE_BUSY (261). Must be first so the
-		// timeout is active before the WAL pragma below.
+		// this, two `recall` processes opening the DB at once (e.g. a GUI client
+		// such as recall-app firing a refresh while another recall runs) collide on
+		// the exclusive lock `journal_mode=WAL` needs → SQLITE_BUSY (261). Must be
+		// first so the timeout is active before the WAL pragma below.
 		`PRAGMA busy_timeout=5000;`,
 		`PRAGMA journal_mode=WAL;`,
 		`PRAGMA synchronous=NORMAL;`,

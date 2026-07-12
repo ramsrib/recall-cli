@@ -1,5 +1,5 @@
 {
-  "_about": "Labeled retrieval eval for recall. Each item is a realistic natural-language query paraphrased from a known session's topic; `gold` lists session-id prefixes (8 hex) that are relevant. Authored by Claude from session metadata/snippets in the real index (2026-05-31) — single annotator, paraphrased to favor semantic over lexical recall. Limitations noted in docs/embedding-models.md.",
+  "_about": "Labeled retrieval eval for recall. Each item is a realistic natural-language query; `gold` lists the session-id prefixes (8 hex) that count as relevant answers. NOT REPRODUCIBLE BY OUTSIDERS: the gold ids refer to the original author's local, private transcript corpus, which is not published — run this fixture against your own index and every query scores zero, by construction. To evaluate on your corpus, replace `queries` with your own queries and gold session ids (`recall \"<topic>\" --pretty` shows the ids). Method, limitations, and how to do that: docs/embedding-models.md. Single annotator, paraphrased to favor semantic over lexical recall.",
   "queries": [
     { "query": "building and installing the recall command-line search tool", "gold": ["4a4b4bfe", "0caa348c"] },
     { "query": "pulling daily app usage statistics from a macOS system API", "gold": ["3281c292"] },
