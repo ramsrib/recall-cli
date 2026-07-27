@@ -32,8 +32,9 @@ It also doubles as a session manager: list, pin, summarize, and resume past sess
 
 ## Prerequisites
 
-- **Go** — `go.mod` declares **1.26.3**, so that's the minimum the toolchain will accept.
-  Build only; the result is a single binary (no cgo).
+- **Go** — only if you build from source. `go.mod` declares **1.26.3**, so that's the
+  minimum the toolchain will accept. The result is a single binary (no cgo). Not needed
+  if you install with Homebrew.
 - **[Ollama](https://ollama.com)**, running, with an embedding model pulled:
   ```sh
   ollama pull qwen3-embedding:0.6b   # 639 MB
@@ -48,6 +49,20 @@ Developed and used on macOS (arm64). Nothing is knowingly platform-specific exce
 transcript locations and the resume commands, but Linux/Windows are untested.
 
 ## Install
+
+**Homebrew** (easiest — prebuilt binary, no Go toolchain needed):
+
+```sh
+brew install ramsrib/tap/recall
+```
+
+**`go install`** (installs the binary as `recall-cli`; rename or alias it to `recall`):
+
+```sh
+go install github.com/ramsrib/recall-cli@latest
+```
+
+**From source:**
 
 ```sh
 git clone https://github.com/ramsrib/recall-cli
@@ -66,9 +81,6 @@ make clean      # remove the local build artifact
 ```
 
 Or plain Go: `go build -o recall .`
-
-> `go install github.com/ramsrib/recall-cli@latest` does **not** work: the module is
-> declared as `module recall` (a local path), not its repository URL. Clone and build.
 
 ## Quickstart
 
