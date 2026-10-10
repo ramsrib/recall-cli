@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -47,12 +48,21 @@ func runIndex(args []string) {
 	run := store.IndexRun{StartedAt: time.Now().Unix(), Model: em.Model, Host: em.Host(), Interactive: tty}
 	start := time.Now()
 
-	unlock, holder := lockIndex()
+	// Every outcome below ends in finishRun, so stdout always carries the run
+	// record, even when the run never got going.
+	unlock, holder, err := lockIndex()
+	if err != nil {
+		failRun(nil, &run, start, err)
+	}
 	if unlock == nil {
-		st := openStore()
+		// Recording a refused run is best-effort: the run holding the lock may
+		// also hold SQLite's write lock for longer than the busy timeout.
+		st, _ := tryOpenStore()
 		run.Status = "locked"
 		finishRun(st, &run, start)
-		st.Close()
+		if st != nil {
+			st.Close()
+		}
 		who := "another `recall index`"
 		if holder != "" {
 			who += " (pid " + holder + ")"
@@ -61,7 +71,11 @@ func runIndex(args []string) {
 		os.Exit(exitLocked)
 	}
 	defer unlock()
-	st := openStore()
+	st, err := tryOpenStore()
+	if err != nil {
+		unlock()
+		failRun(nil, &run, start, err)
+	}
 	defer st.Close()
 
 	// Ctrl-C stops between embedding batches. Each file commits on its own,
@@ -71,7 +85,7 @@ func runIndex(args []string) {
 
 	p := newProgress(tty, em)
 	stats, err := index.Run(ctx, st, em, run.StartedAt, p)
-	p.clear()
+	p.done()
 
 	run.New, run.Appended, run.Changed = stats.New, stats.Appended, stats.Changed
 	run.Remodeled, run.Skipped, run.Deleted = stats.Remodeled, stats.Skipped, stats.Deleted
@@ -91,19 +105,43 @@ func runIndex(args []string) {
 	switch run.Status {
 	case "interrupted":
 		fmt.Fprintln(os.Stderr, "interrupted: finished files are kept; run `recall index` again to do the rest")
+		unlock()
+		st.Close()
 		os.Exit(130)
 	case "error":
+		unlock()
+		st.Close()
 		fatal(err)
 	}
 }
 
-// finishRun stamps the run's duration, records it (best-effort: a failure to
-// log must not change the run's outcome), and prints it to stdout as compact
-// JSON for scripts and agents. Progress and the summary go to stderr.
+// tryOpenStore opens the default index DB, returning the error instead of exiting.
+func tryOpenStore() (*store.Store, error) {
+	path, err := store.DefaultPath()
+	if err != nil {
+		return nil, err
+	}
+	return store.Open(path)
+}
+
+// failRun ends a run that could not start: it reports the error as the run
+// record and exits 1.
+func failRun(st *store.Store, run *store.IndexRun, start time.Time, err error) {
+	run.Status, run.Error = "error", err.Error()
+	finishRun(st, run, start)
+	fatal(err)
+}
+
+// finishRun stamps the run's duration, records it if st is non-nil
+// (best-effort: a failure to log must not change the run's outcome), and
+// prints it to stdout as compact JSON for scripts and agents. Progress and
+// the summary go to stderr.
 func finishRun(st *store.Store, run *store.IndexRun, start time.Time) {
 	run.DurationMs = time.Since(start).Milliseconds()
-	if err := st.LogIndexRun(*run); err != nil {
-		fmt.Fprintln(os.Stderr, "recall: warning: failed to log index run: "+err.Error())
+	if st != nil {
+		if err := st.LogIndexRun(*run); err != nil {
+			fmt.Fprintln(os.Stderr, "recall: warning: failed to log index run: "+err.Error())
+		}
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(run)
 }
@@ -179,29 +217,42 @@ func runIndexHistory(limit int, pretty bool) {
 // would embed the same files twice and contend on SQLite's write lock: a
 // manual run alongside the scheduled one, say, or a GUI client's refresh. The
 // lock is a flock on a file next to the DB, so the kernel drops it when the
-// process exits, however it exits. If another run holds it, lockIndex returns
-// a nil unlock and that run's pid, when known.
-func lockIndex() (unlock func(), holder string) {
+// process exits, however it exits. The holder writes its pid into the file for
+// the message a refused run prints.
+//
+// If another run holds the lock, unlock is nil and holder is that run's pid,
+// or "" if it isn't known yet (or names a process that is gone).
+func lockIndex() (unlock func(), holder string, err error) {
 	dbPath, err := store.DefaultPath()
 	if err != nil {
-		fatal(err)
+		return nil, "", err
 	}
 	f, err := os.OpenFile(filepath.Join(filepath.Dir(dbPath), "index.lock"), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		fatal(err)
+		return nil, "", err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		defer f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			b := make([]byte, 16)
-			n, _ := f.ReadAt(b, 0)
-			return nil, strings.TrimSpace(string(b[:n]))
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, "", err
 		}
-		fatal(err)
+		b := make([]byte, 16)
+		n, _ := f.ReadAt(b, 0)
+		pid, perr := strconv.Atoi(strings.TrimSpace(string(b[:n])))
+		if perr != nil || pid <= 0 || syscall.Kill(pid, 0) == syscall.ESRCH {
+			return nil, "", nil
+		}
+		return nil, strconv.Itoa(pid), nil
 	}
 	_ = f.Truncate(0)
 	_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
-	return func() { f.Close() }, ""
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = f.Truncate(0) // so a later refused run never names this pid
+			f.Close()
+		})
+	}, "", nil
 }
 
 // --- progress ---------------------------------------------------------------
@@ -214,26 +265,51 @@ const heartbeat = 15 * time.Second
 // line. Anywhere else (an agent, a log, a GUI client reading lines), output
 // is plain lines: one per finished file, plus a heartbeat every few seconds
 // for a file that takes long, so a slow pass never looks hung and a fast one
-// stays short.
+// stays short. A ticker keeps both going while a single embedding request is
+// slow, since no event arrives until it returns.
 type progress struct {
-	tty   bool
-	em    *embed.Client
-	todo  int
-	i     int
-	path  string
-	since time.Time // when the current file started
-	last  time.Time // when line mode last printed anything
-	live  bool      // a rewritable line is on screen
+	tty  bool
+	em   *embed.Client
+	stop chan struct{}
+
+	mu     sync.Mutex // guards the rest; Run's goroutine and the ticker both print
+	todo   int
+	i      int
+	path   string
+	msg    string    // what the file in flight is doing
+	active bool      // a file is in flight
+	since  time.Time // when it started
+	last   time.Time // when line mode last printed anything
+	live   bool      // a rewritable line is on screen
 }
 
 func newProgress(tty bool, em *embed.Client) *progress {
-	return &progress{tty: tty, em: em, last: time.Now()}
+	p := &progress{tty: tty, em: em, stop: make(chan struct{}), last: time.Now()}
+	go func() {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-p.stop:
+				return
+			case <-t.C:
+				p.mu.Lock()
+				if p.active {
+					p.status()
+				}
+				p.mu.Unlock()
+			}
+		}
+	}()
+	return p
 }
 
 func (p *progress) Planned(todo, total int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.todo = todo
 	if todo == 0 {
-		fmt.Fprintf(os.Stderr, "all %s sessions are up to date\n", fmtInt(total))
+		p.println(fmt.Sprintf("all %s sessions are up to date", fmtInt(total)))
 		return
 	}
 	p.println(fmt.Sprintf("indexing %s of %s sessions with %s on %s",
@@ -241,19 +317,26 @@ func (p *progress) Planned(todo, total int) {
 }
 
 func (p *progress) Started(i int, path, _ string) {
-	p.i, p.path, p.since = i, path, time.Now()
-	p.status("reading")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.i, p.path, p.since, p.active, p.msg = i, path, time.Now(), true, "reading"
+	p.status()
 }
 
 func (p *progress) Embedded(done, total int) {
-	msg := fmt.Sprintf("embedding %s/%s chunks", fmtInt(done), fmtInt(total))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.msg = fmt.Sprintf("embedding %s/%s chunks", fmtInt(done), fmtInt(total))
 	if total > 0 {
-		msg += fmt.Sprintf(" (%d%%)", done*100/total)
+		p.msg += fmt.Sprintf(" (%d%%)", done*100/total)
 	}
-	p.status(msg)
+	p.status()
 }
 
 func (p *progress) Finished(i int, f index.FileStat) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.active = false
 	what := fmtInt(f.Chunks) + " chunks"
 	if f.How == "appended" {
 		what = "+" + what
@@ -261,7 +344,20 @@ func (p *progress) Finished(i int, f index.FileStat) {
 	p.println(fmt.Sprintf("  %s  %-9s %14s %7s  %s", p.counter(i), f.How, what, fmtDur(f.Took), trimHome(f.Path)))
 }
 
-func (p *progress) Note(msg string) { p.println("  note: " + msg) }
+func (p *progress) Note(msg string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.println("  note: " + msg)
+}
+
+// done stops the ticker and removes the rewritable line.
+func (p *progress) done() {
+	close(p.stop)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.active = false
+	p.clear()
+}
 
 func (p *progress) counter(i int) string {
 	w := len(strconv.Itoa(p.todo))
@@ -269,9 +365,9 @@ func (p *progress) counter(i int) string {
 }
 
 // status reports the file in flight: rewritten in place on a terminal, a
-// heartbeat line elsewhere.
-func (p *progress) status(msg string) {
-	line := fmt.Sprintf("  %s  %s  %s  %s", p.counter(p.i), msg, fmtDur(time.Since(p.since)), trimHome(p.path))
+// heartbeat line elsewhere. Callers hold p.mu.
+func (p *progress) status() {
+	line := fmt.Sprintf("  %s  %s  %s  %s", p.counter(p.i), p.msg, fmtDur(time.Since(p.since)), trimHome(p.path))
 	if p.tty {
 		fmt.Fprint(os.Stderr, "\r\033[K"+fitWidth(line, termWidth()))
 		p.live = true
@@ -282,13 +378,14 @@ func (p *progress) status(msg string) {
 	}
 }
 
+// println prints a permanent line. Callers hold p.mu.
 func (p *progress) println(line string) {
 	p.clear()
 	fmt.Fprintln(os.Stderr, line)
 	p.last = time.Now()
 }
 
-// clear removes the rewritable line, if one is showing.
+// clear removes the rewritable line, if one is showing. Callers hold p.mu.
 func (p *progress) clear() {
 	if p.live {
 		fmt.Fprint(os.Stderr, "\r\033[K")
@@ -320,6 +417,9 @@ func fitWidth(s string, width int) string {
 	r := []rune(s)
 	if len(r) < width {
 		return s
+	}
+	if width < 8 { // too narrow to elide sensibly
+		return string(r[:max(width-1, 0)])
 	}
 	keep := width - 2
 	head := keep * 2 / 3

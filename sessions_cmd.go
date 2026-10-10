@@ -18,6 +18,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -52,7 +53,7 @@ func runList(args []string) {
 
 	// Reconcile the sessions registry with disk so new sessions show up without a
 	// reindex. Cheap: unchanged files cost only a stat (open-only-changed).
-	if err := index.RefreshSessions(st); err != nil {
+	if err := index.RefreshSessions(context.Background(), st); err != nil {
 		fmt.Fprintln(os.Stderr, "recall: warning: session refresh failed: "+err.Error())
 	}
 

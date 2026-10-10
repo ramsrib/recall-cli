@@ -137,6 +137,8 @@ func Run(ctx context.Context, st *store.Store, em *embed.Client, now int64, p Pr
 		}
 		p.Started(i+1, j.sf.Path, j.sf.Source)
 		f, err := indexFile(ctx, st, em, now, j.sf, j.mt, j.sz, j.m, j.indexed, p)
+		// Time spent embedding counts even if the file then didn't make it in.
+		stats.Embed += f.Embed
 		if errors.Is(err, errSkip) {
 			continue
 		}
@@ -154,13 +156,15 @@ func Run(ctx context.Context, st *store.Store, em *embed.Client, now int64, p Pr
 			stats.Changed++
 		}
 		stats.Chunks += f.Chunks
-		stats.Embed += f.Embed
 		stats.Files = append(stats.Files, f)
 		p.Finished(i+1, f)
 	}
 
 	for path := range manifest {
 		if !present[path] {
+			if err := ctx.Err(); err != nil {
+				return stats, err
+			}
 			if err := st.DeleteFile(path); err != nil {
 				return stats, err
 			}
@@ -169,7 +173,10 @@ func Run(ctx context.Context, st *store.Store, em *embed.Client, now int64, p Pr
 	}
 
 	// Keep the sessions registry (what `recall list` reads) in sync with disk.
-	if err := RefreshSessions(st); err != nil {
+	if err := RefreshSessions(ctx, st); err != nil {
+		if ctx.Err() != nil {
+			return stats, ctx.Err()
+		}
 		p.Note(fmt.Sprintf("session registry refresh failed: %v", err))
 	}
 	return stats, nil
