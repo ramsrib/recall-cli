@@ -207,10 +207,12 @@ type FileMeta struct {
 	IndexedAt  int64
 	EmbedModel string
 	Cursor     string // JSON owned by internal/index; "" if never recorded
+	Chunks     int    // chunks currently stored for the file
 }
 
 func (s *Store) Manifest() (map[string]FileMeta, error) {
-	rows, err := s.db.Query(`SELECT path, mtime_ns, size, indexed_at, COALESCE(embed_model,''), COALESCE(cursor,'') FROM files`)
+	rows, err := s.db.Query(`SELECT path, mtime_ns, size, indexed_at, COALESCE(embed_model,''), COALESCE(cursor,''),
+		(SELECT COUNT(*) FROM chunks WHERE file_path=files.path) FROM files`)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +221,7 @@ func (s *Store) Manifest() (map[string]FileMeta, error) {
 	for rows.Next() {
 		var p string
 		var fm FileMeta
-		if err := rows.Scan(&p, &fm.MtimeNs, &fm.Size, &fm.IndexedAt, &fm.EmbedModel, &fm.Cursor); err != nil {
+		if err := rows.Scan(&p, &fm.MtimeNs, &fm.Size, &fm.IndexedAt, &fm.EmbedModel, &fm.Cursor, &fm.Chunks); err != nil {
 			return nil, err
 		}
 		m[p] = fm
@@ -267,9 +269,14 @@ var ErrStale = errors.New("file was re-indexed concurrently")
 func (s *Store) AppendFile(u FileUpdate, prev FileMeta, retitle string) error {
 	return s.writeFile(u, func(tx *sql.Tx) error {
 		var n int
+		// The chunk count matters because a build that predates cursors can
+		// rewrite every other column to the same values (same second, same
+		// stat) while having indexed more of the file.
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM files WHERE path=? AND mtime_ns=? AND size=?
-			AND indexed_at=? AND COALESCE(embed_model,'')=? AND COALESCE(cursor,'')=?`,
-			u.Path, prev.MtimeNs, prev.Size, prev.IndexedAt, prev.EmbedModel, prev.Cursor).Scan(&n); err != nil {
+			AND indexed_at=? AND COALESCE(embed_model,'')=? AND COALESCE(cursor,'')=?
+			AND (SELECT COUNT(*) FROM chunks WHERE file_path=?)=?`,
+			u.Path, prev.MtimeNs, prev.Size, prev.IndexedAt, prev.EmbedModel, prev.Cursor,
+			u.Path, prev.Chunks).Scan(&n); err != nil {
 			return err
 		}
 		if n == 0 {

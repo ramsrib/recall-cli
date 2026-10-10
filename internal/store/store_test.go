@@ -20,9 +20,11 @@ func TestAppendFileRefusesRowChangedSinceRead(t *testing.T) {
 	}
 	read, _ := st.Manifest()
 
-	// Another indexer (an older build that leaves cursor alone) rewrites the file meanwhile.
+	// Another indexer (an older build that leaves cursor alone) re-indexes the
+	// grown file meanwhile, in the same second, so every column matches; only
+	// the chunks differ.
 	old := u
-	old.IndexedAt, old.Cursor, old.Chunks = 200, "c1", chunk("a b")
+	old.Chunks = append(chunk("a"), chunk("b")...)
 	if err := st.ReplaceFile(old); err != nil {
 		t.Fatal(err)
 	}
@@ -32,8 +34,8 @@ func TestAppendFileRefusesRowChangedSinceRead(t *testing.T) {
 	if err := st.AppendFile(tail, read["/s.jsonl"], ""); !errors.Is(err, ErrStale) {
 		t.Fatalf("err=%v, want ErrStale", err)
 	}
-	if _, n, _ := st.Counts(); n != 1 {
-		t.Fatalf("stale append wrote chunks: %d chunks, want 1", n)
+	if _, n, _ := st.Counts(); n != 2 {
+		t.Fatalf("stale append wrote chunks: %d chunks, want 2", n)
 	}
 
 	// Appending against the current row goes through.
@@ -41,7 +43,7 @@ func TestAppendFileRefusesRowChangedSinceRead(t *testing.T) {
 	if err := st.AppendFile(tail, read["/s.jsonl"], ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, n, _ := st.Counts(); n != 2 {
-		t.Fatalf("%d chunks after append, want 2", n)
+	if _, n, _ := st.Counts(); n != 3 {
+		t.Fatalf("%d chunks after append, want 3", n)
 	}
 }

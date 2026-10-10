@@ -28,6 +28,10 @@ type fileCursor struct {
 	MtimeNs   int64 `json:"mtime_ns"`
 	Size      int64 `json:"size"`
 	IndexedAt int64 `json:"indexed_at"`
+	// Chunks is how many chunks the file had once this cursor was written.
+	// It catches the one rewrite the row stamp can't: an old build that
+	// stamps the row identically (same second, same stat) but indexed more.
+	Chunks int `json:"chunks"`
 }
 
 // Stats counts files by what a pass did with them. Appended files grew and had
@@ -91,7 +95,8 @@ func Run(st *store.Store, em *embed.Client, now int64, log func(string)) (Stats,
 		var fc fileCursor
 		appending := indexed && modelSame && m.Cursor != "" &&
 			json.Unmarshal([]byte(m.Cursor), &fc) == nil &&
-			fc.MtimeNs == m.MtimeNs && fc.Size == m.Size && fc.IndexedAt == m.IndexedAt
+			fc.MtimeNs == m.MtimeNs && fc.Size == m.Size && fc.IndexedAt == m.IndexedAt &&
+			fc.Chunks == m.Chunks
 		cur := adapter.Cursor{}
 		if appending {
 			cur = fc.Cursor
@@ -109,7 +114,11 @@ func Run(st *store.Store, em *embed.Client, now int64, log func(string)) (Stats,
 		if err := embedChunks(em, chunks); err != nil {
 			return stats, fmt.Errorf("embed %s: %w", sf.Path, err)
 		}
-		cursor, err := json.Marshal(fileCursor{Cursor: next, MtimeNs: mt, Size: sz, IndexedAt: now})
+		total := len(chunks)
+		if appending {
+			total += m.Chunks
+		}
+		cursor, err := json.Marshal(fileCursor{Cursor: next, MtimeNs: mt, Size: sz, IndexedAt: now, Chunks: total})
 		if err != nil {
 			return stats, err
 		}
