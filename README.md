@@ -114,6 +114,22 @@ deleted from disk are dropped from the index.
   reindex. Default: `$RECALL_EMBED_MODEL`, else `qwen3-embedding:0.6b`.
 - Requires Ollama to be running with the model pulled.
 - Also refreshes the sessions registry that `recall list` reads.
+- Progress goes to stderr. In a terminal, the file being indexed is one live line
+  (`[3/23] embedding 1,280/5,468 chunks (23%)`) and every finished file gets a line of
+  its own. Anywhere else (an agent, a log, a GUI client) it prints plain lines: one
+  per finished file, plus a heartbeat every 15s while a large file is embedding.
+- The run's record goes to stdout as compact JSON: status, duration, time spent
+  embedding, counts, and the slowest files.
+- Ctrl-C stops between embedding batches and keeps every file already finished (exit 130).
+  If another `recall index` is running, it exits 75 without doing anything.
+
+### `recall index --history [--limit N] [--pretty]`
+
+Every `recall index` is logged to an `index_runs` table, whoever started it: you, a
+scheduled job, an agent, or a GUI client. `--history` lists the most recent runs as JSON
+(`--pretty` for a table): when each ran, its outcome (`ok`, `error`, `interrupted`, or
+`locked` when another run was in progress), how long it took and how much of that was
+embedding, what it did, the embedding host, and its slowest files.
 
 ### `recall "QUERY" [flags]`
 

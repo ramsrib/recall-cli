@@ -88,6 +88,23 @@ func (s *Store) init() error {
 			top_sessions TEXT,            -- JSON array of "source/session_id", best first
 			duration_ms INTEGER);`,
 		`CREATE INDEX IF NOT EXISTS idx_queries_ts ON queries(ts);`,
+		// Every `recall index` is logged here too, whoever ran it (a person,
+		// the scheduled job, an agent, a GUI client): what it did and what it
+		// cost. See runs.go.
+		`CREATE TABLE IF NOT EXISTS index_runs (
+			id INTEGER PRIMARY KEY,
+			started_at INTEGER NOT NULL,  -- unix seconds
+			duration_ms INTEGER NOT NULL,
+			embed_ms INTEGER NOT NULL,    -- of which waiting on the embedder
+			status TEXT NOT NULL,         -- ok|error|interrupted|locked
+			error TEXT,
+			model TEXT NOT NULL, host TEXT NOT NULL,
+			interactive INTEGER NOT NULL, -- 1 if stderr was a terminal
+			n_new INTEGER NOT NULL, n_appended INTEGER NOT NULL, n_changed INTEGER NOT NULL,
+			n_remodeled INTEGER NOT NULL, n_skipped INTEGER NOT NULL, n_deleted INTEGER NOT NULL,
+			chunks INTEGER NOT NULL,
+			files TEXT);                  -- JSON: the costliest files, slowest first`,
+		`CREATE INDEX IF NOT EXISTS idx_index_runs_started ON index_runs(started_at);`,
 		// Pinned sessions (manager UX). Keyed by source+session_id; pinned_at
 		// drives "most-recently-pinned first" ordering in the pinned group.
 		`CREATE TABLE IF NOT EXISTS pins (

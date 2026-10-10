@@ -18,18 +18,15 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/ramsrib/recall-cli/internal/embed"
-	"github.com/ramsrib/recall-cli/internal/index"
 	"github.com/ramsrib/recall-cli/internal/search"
 	"github.com/ramsrib/recall-cli/internal/store"
 )
@@ -71,7 +68,11 @@ func usage() {
 	fmt.Fprint(os.Stderr, `recall — search Claude Code + Codex session history
 
 Usage:
-  recall index [--model NAME]
+  recall index [--model NAME]   embed new/changed sessions; progress on stderr, the
+                                run record as JSON on stdout. Exit 75: another index
+                                run is in progress; 130: interrupted (work so far kept)
+  recall index --history [--limit N] [--pretty]   recent index runs: timing, counts,
+                                slowest files (every run is logged, whoever starts it)
   recall "QUERY" [--mode hybrid|semantic|lexical] [--source claude|codex]
                  [--project SUBSTR] [--since YYYY-MM-DD] [--limit N]
                  [--model NAME] [--include-exec] [--pretty]
@@ -104,37 +105,6 @@ Output:
   no flag needed when calling from a script or agent.
   Pass --pretty for a human-readable table (DATETIME SOURCE SESSION PROJECT TITLE).
 `)
-}
-
-func runIndex(args []string) {
-	fs := flag.NewFlagSet("index", flag.ExitOnError)
-	model := fs.String("model", "", "embedding model (default: $RECALL_EMBED_MODEL or qwen3-embedding:0.6b)")
-	_ = fs.Parse(args)
-
-	unlock := lockIndex()
-	defer unlock()
-	st := openStore()
-	defer st.Close()
-	em := embed.New(*model)
-
-	fmt.Fprintf(os.Stderr, "indexing (model=%s)…\n", em.Model)
-	stats, err := index.Run(st, em, time.Now().Unix(), func(s string) {
-		fmt.Fprintln(os.Stderr, s)
-	})
-	if err != nil {
-		fatal(err)
-	}
-	files, chunks := mustCounts(st)
-	fmt.Fprintf(os.Stderr, "\ndone: +%d new, %d appended, %d changed, %d re-embedded (model change), %d skipped, %d deleted (%d chunks this run)\n",
-		stats.New, stats.Appended, stats.Changed, stats.Remodeled, stats.Skipped, stats.Deleted, stats.Chunks)
-	fmt.Fprintf(os.Stderr, "index now holds %d sessions/files, %d chunks\n", files, chunks)
-	if mc, err := st.ModelCounts(); err == nil && len(mc) > 1 {
-		fmt.Fprintf(os.Stderr, "embedding models in index:\n")
-		for m, n := range mc {
-			fmt.Fprintf(os.Stderr, "  %-24s %d files\n", m, n)
-		}
-		fmt.Fprintf(os.Stderr, "re-run `recall index` to bring all files onto %s.\n", em.Model)
-	}
 }
 
 func runSearch(args []string) {
@@ -311,30 +281,6 @@ func splitArgs(args []string) (flags, pos []string) {
 		pos = append(pos, a)
 	}
 	return
-}
-
-// lockIndex makes `recall index` single-instance. Two passes over the same DB
-// would embed the same files twice and contend on SQLite's write lock: a
-// manual run alongside the scheduled one, say, or a GUI client's refresh. The
-// lock is a flock on a file next to the DB, so the kernel drops it when the
-// process exits, however it exits.
-func lockIndex() (unlock func()) {
-	dbPath, err := store.DefaultPath()
-	if err != nil {
-		fatal(err)
-	}
-	f, err := os.OpenFile(filepath.Join(filepath.Dir(dbPath), "index.lock"), os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		fatal(err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			fatal(fmt.Errorf("another `recall index` is already running"))
-		}
-		fatal(err)
-	}
-	return func() { f.Close() }
 }
 
 func openStore() *store.Store {

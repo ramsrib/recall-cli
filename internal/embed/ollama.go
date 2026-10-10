@@ -13,6 +13,7 @@ package embed
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -96,9 +97,20 @@ type embedResp struct {
 	Embeddings [][]float32 `json:"embeddings"`
 }
 
-func (c *Client) post(texts []string) ([][]float32, error) {
+// Host is the Ollama server this client embeds with.
+func (c *Client) Host() string { return c.url }
+
+func (c *Client) post(ctx context.Context, texts []string) ([][]float32, error) {
 	body, _ := json.Marshal(embedReq{Model: c.Model, Input: texts})
-	resp, err := c.http.Post(c.url+"/api/embed", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url+"/api/embed", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("ollama unreachable at %s (is it running?): %w", c.url, err)
 	}
@@ -114,13 +126,14 @@ func (c *Client) post(texts []string) ([][]float32, error) {
 	return er.Embeddings, nil
 }
 
-// EmbedDocuments embeds chunk texts (with the document prefix).
-func (c *Client) EmbedDocuments(texts []string) ([][]float32, error) {
+// EmbedDocuments embeds chunk texts (with the document prefix). Cancelling ctx
+// abandons the request in flight.
+func (c *Client) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
 	in := make([]string, len(texts))
 	for i, t := range texts {
 		in[i] = c.docInput(t)
 	}
-	vs, err := c.post(in)
+	vs, err := c.post(ctx, in)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +145,7 @@ func (c *Client) EmbedDocuments(texts []string) ([][]float32, error) {
 
 // EmbedQuery embeds a search query (with the query prefix).
 func (c *Client) EmbedQuery(q string) ([]float32, error) {
-	vs, err := c.post([]string{c.queryInput(q)})
+	vs, err := c.post(context.Background(), []string{c.queryInput(q)})
 	if err != nil {
 		return nil, err
 	}

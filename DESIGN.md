@@ -170,6 +170,20 @@ CREATE TABLE queries (            -- query log: every search is recorded here
   top_sessions TEXT,              -- JSON ["source/session_id", …], best first
   duration_ms  INTEGER
 );                                -- idx_queries_ts
+
+CREATE TABLE index_runs (         -- run log: every `recall index` is recorded here
+  id           INTEGER PRIMARY KEY,
+  started_at   INTEGER NOT NULL,  -- unix seconds
+  duration_ms  INTEGER NOT NULL,
+  embed_ms     INTEGER NOT NULL,  -- of which waiting on the embedder
+  status       TEXT NOT NULL,     -- ok|error|interrupted|locked
+  error        TEXT,
+  model TEXT NOT NULL, host TEXT NOT NULL,   -- what embedded, and where
+  interactive  INTEGER NOT NULL,  -- 1 if stderr was a terminal
+  n_new, n_appended, n_changed, n_remodeled, n_skipped, n_deleted INTEGER NOT NULL,
+  chunks       INTEGER NOT NULL,  -- chunks embedded this run
+  files        TEXT               -- JSON: up to 10 slowest files {path, how, chunks, ms, embed_ms}
+);                                -- idx_index_runs_started
 ```
 
 ### What recall creates vs. mirrors
@@ -227,8 +241,15 @@ the file still begins with exactly those bytes, only what follows is parsed and 
 verifying the prefix is one sequential read, far cheaper than parsing it. A changed title is
 written onto the file's existing chunks. Anything else (a rewritten or truncated file, a model
 switch, a row rewritten by a build that predates cursors) falls back to a full reindex, and an
-append whose manifest row changed while it was embedding is dropped rather than applied. `recall index` holds an exclusive `flock` on `index.lock` next to the DB, so overlapping
-runs refuse instead of embedding the same files twice.
+append whose manifest row changed while it was embedding is dropped rather than applied.
+
+**One run at a time, every run recorded.** `recall index` holds an exclusive `flock` on
+`index.lock` next to the DB (the holder writes its pid there), so an overlapping run exits 75
+instead of embedding the same files twice. Each file commits in its own transaction, so Ctrl-C
+(checked between embedding batches, and cancelling the request in flight) keeps every finished
+file. Whatever the outcome, the run is written to `index_runs` and printed to stdout as JSON;
+progress goes to stderr, as one rewritten line on a terminal and as sparse plain lines anywhere
+else, since agents and GUI clients read it too.
 
 **Embedding-model tracking.** Each file (and its chunks) records the model that produced its
 vectors. `meta.embed_model` holds the *current* model — the one a query embeds with by default
