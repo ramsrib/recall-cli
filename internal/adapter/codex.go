@@ -1,9 +1,7 @@
 package adapter
 
 import (
-	"bufio"
 	"encoding/json"
-	"os"
 	"strings"
 )
 
@@ -27,37 +25,27 @@ type codexMessage struct {
 	} `json:"content"`
 }
 
-func parseCodex(path string) ([]Record, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
+func parseCodex(path string, cur Cursor) ([]Record, Cursor, error) {
 	var recs []Record
-	var sessionID, project string
-	var sessionTs int64
-
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 32<<20)
-	for sc.Scan() {
+	next := cur
+	end, err := scanLines(path, cur.Offset, func(line []byte) {
 		var l codexLine
-		if json.Unmarshal(sc.Bytes(), &l) != nil {
-			continue
+		if json.Unmarshal(line, &l) != nil {
+			return
 		}
 		switch l.Type {
 		case "session_meta":
 			var m codexMeta
 			if json.Unmarshal(l.Payload, &m) == nil {
-				sessionID, project, sessionTs = m.ID, m.Cwd, parseISO(m.Timestamp)
+				next.SessionID, next.Project, next.Ts = m.ID, m.Cwd, parseISO(m.Timestamp)
 			}
 		case "response_item":
 			var m codexMessage
 			if json.Unmarshal(l.Payload, &m) != nil || m.Type != "message" {
-				continue
+				return
 			}
 			if m.Role != "user" && m.Role != "assistant" { // skip developer/system
-				continue
+				return
 			}
 			var parts []string
 			for _, c := range m.Content {
@@ -67,23 +55,27 @@ func parseCodex(path string) ([]Record, error) {
 			}
 			text := strings.Join(parts, "\n")
 			if strings.TrimSpace(text) == "" {
-				continue
+				return
 			}
 			recs = append(recs, Record{
 				Source:    "codex",
-				SessionID: sessionID,
-				Project:   project,
-				Timestamp: sessionTs,
+				SessionID: next.SessionID,
+				Project:   next.Project,
+				Timestamp: next.Ts,
 				Role:      m.Role,
 				Text:      text,
 			})
 		}
-	}
+	})
+	next.Offset = end
 
 	// Codex has no ai-title; derive one from the first "real" user message
-	// (skip injected AGENTS.md / instruction blocks).
-	title := ""
+	// (skip injected AGENTS.md / instruction blocks). Once found it sticks, so
+	// a tail parse keeps the title an earlier pass derived.
 	for _, r := range recs {
+		if next.Title != "" {
+			break
+		}
 		if r.Role != "user" {
 			continue
 		}
@@ -91,11 +83,10 @@ func parseCodex(path string) ([]Record, error) {
 		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "<") {
 			continue
 		}
-		title = firstLine(t, 80)
-		break
+		next.Title = firstLine(t, 80)
 	}
 	for i := range recs {
-		recs[i].Title = title
+		recs[i].Title = next.Title
 	}
-	return recs, sc.Err()
+	return recs, next, err
 }

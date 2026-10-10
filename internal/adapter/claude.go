@@ -1,9 +1,7 @@
 package adapter
 
 import (
-	"bufio"
 	"encoding/json"
-	"os"
 	"strings"
 )
 
@@ -21,32 +19,24 @@ type claudeMessage struct {
 	Content json.RawMessage `json:"content"`
 }
 
-func parseClaude(path string) ([]Record, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
+func parseClaude(path string, cur Cursor) ([]Record, Cursor, error) {
 	var recs []Record
-	title := ""
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 32<<20) // some lines are large
-	for sc.Scan() {
+	next := cur
+	end, err := scanLines(path, cur.Offset, func(line []byte) {
 		var l claudeLine
-		if json.Unmarshal(sc.Bytes(), &l) != nil {
-			continue
+		if json.Unmarshal(line, &l) != nil {
+			return
 		}
 		if l.Type == "ai-title" && l.AiTitle != "" {
-			title = l.AiTitle
-			continue
+			next.Title = l.AiTitle
+			return
 		}
 		if (l.Type != "user" && l.Type != "assistant") || l.Message == nil {
-			continue
+			return
 		}
 		text := extractClaudeContent(l.Message.Content)
 		if strings.TrimSpace(text) == "" {
-			continue
+			return
 		}
 		recs = append(recs, Record{
 			Source:    "claude",
@@ -56,11 +46,12 @@ func parseClaude(path string) ([]Record, error) {
 			Role:      l.Message.Role,
 			Text:      text,
 		})
-	}
+	})
+	next.Offset = end
 	for i := range recs {
-		recs[i].Title = title
+		recs[i].Title = next.Title
 	}
-	return recs, sc.Err()
+	return recs, next, err
 }
 
 // extractClaudeContent pulls human-readable text from a message's content,

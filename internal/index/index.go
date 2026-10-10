@@ -2,6 +2,7 @@
 package index
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -17,15 +18,27 @@ const maxChunkRunes = 2000
 // embedBatch is how many chunks we send to Ollama per request.
 const embedBatch = 64
 
+// Stats counts files by what a pass did with them. Appended files grew and had
+// only their new tail embedded; Changed files were re-read in full.
+// fileCursor is what files.cursor holds: the parse cursor plus the mtime of
+// the manifest row it was written with. A recall build that predates cursors
+// re-indexes a file without touching this column, so a cursor whose mtime no
+// longer matches its row is stale and must not be resumed from.
+type fileCursor struct {
+	adapter.Cursor
+	MtimeNs int64 `json:"mtime_ns"`
+}
+
 type Stats struct {
-	New, Changed, Remodeled, Skipped, Deleted, Chunks int
+	New, Appended, Changed, Remodeled, Skipped, Deleted, Chunks int
 }
 
 // Run reconciles the index with disk. now is the indexed_at timestamp (unix sec).
 //
 // Each file records the embedding model that produced its vectors. A file is
 // re-embedded when its content changed (mtime/size) OR when it was indexed
-// under a different model than the one in use now. The model switch is handled
+// under a different model than the one in use now. A file that only grew is
+// embedded from where the last pass stopped (see adapter.Cursor). The model switch is handled
 // per-file rather than as one global wipe, so it is incremental and resumable:
 // an interrupted migration just leaves some files on the old model, and the
 // query path simply won't rank those until a later pass brings them over.
@@ -69,7 +82,18 @@ func Run(st *store.Store, em *embed.Client, now int64, log func(string)) (Stats,
 			continue
 		}
 
-		recs, err := adapter.Parse(sf)
+		// A transcript that only grew since the last pass (the common case: a
+		// live session) gets just its new tail parsed and embedded. Anything
+		// else (a rewrite, a model switch, no cursor yet) re-reads the file.
+		var fc fileCursor
+		appending := indexed && modelSame && m.Cursor != "" &&
+			json.Unmarshal([]byte(m.Cursor), &fc) == nil && fc.MtimeNs == m.MtimeNs &&
+			fc.Resumable(sf.Path, sz)
+		cur := adapter.Cursor{}
+		if appending {
+			cur = fc.Cursor
+		}
+		recs, next, err := adapter.ParseFrom(sf, cur)
 		if err != nil {
 			log(fmt.Sprintf("skip %s: %v", sf.Path, err))
 			continue
@@ -78,21 +102,41 @@ func Run(st *store.Store, em *embed.Client, now int64, log func(string)) (Stats,
 		if err := embedChunks(em, chunks); err != nil {
 			return stats, fmt.Errorf("embed %s: %w", sf.Path, err)
 		}
-		if err := st.ReplaceFile(sf.Path, sf.Source, em.Model, mt, sz, now, chunks); err != nil {
+		cursor, err := json.Marshal(fileCursor{Cursor: next, MtimeNs: mt})
+		if err != nil {
+			return stats, err
+		}
+		u := store.FileUpdate{
+			Path: sf.Path, Source: sf.Source, EmbedModel: em.Model,
+			MtimeNs: mt, Size: sz, IndexedAt: now, Cursor: string(cursor), Chunks: chunks,
+		}
+		if appending {
+			retitle := ""
+			if next.Title != cur.Title {
+				retitle = next.Title
+			}
+			err = st.AppendFile(u, retitle)
+		} else {
+			err = st.ReplaceFile(u)
+		}
+		if err != nil {
 			return stats, err
 		}
 		stats.Chunks += len(chunks)
-		why := ""
+		what := fmt.Sprintf("%d chunks", len(chunks))
 		switch {
 		case !indexed:
 			stats.New++
+		case appending:
+			stats.Appended++
+			what = fmt.Sprintf("+%d chunks appended", len(chunks))
 		case contentSame: // unchanged content, different model
 			stats.Remodeled++
-			why = " (re-embed: model change)"
+			what += ", re-embed: model change"
 		default:
 			stats.Changed++
 		}
-		log(fmt.Sprintf("  [%s] %s (%d chunks)%s", sf.Source, trimHome(sf.Path), len(chunks), why))
+		log(fmt.Sprintf("  [%s] %s (%s)", sf.Source, trimHome(sf.Path), what))
 	}
 
 	for path := range manifest {

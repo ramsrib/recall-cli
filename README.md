@@ -93,7 +93,9 @@ recall "that vector db tradeoff discussion" --pretty
 ```
 
 `recall index` is incremental: re-run it anytime and it only touches sessions whose
-files changed. The first run is the slow one — it embeds your entire history.
+files changed, and a session that only grew gets just its new messages embedded. The first
+run is the slow one — it embeds your entire history. Only one `recall index` runs at a time;
+a second one exits with an error instead of waiting.
 
 ## Command reference
 

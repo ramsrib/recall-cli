@@ -18,11 +18,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -109,6 +111,8 @@ func runIndex(args []string) {
 	model := fs.String("model", "", "embedding model (default: $RECALL_EMBED_MODEL or qwen3-embedding:0.6b)")
 	_ = fs.Parse(args)
 
+	unlock := lockIndex()
+	defer unlock()
 	st := openStore()
 	defer st.Close()
 	em := embed.New(*model)
@@ -121,8 +125,8 @@ func runIndex(args []string) {
 		fatal(err)
 	}
 	files, chunks := mustCounts(st)
-	fmt.Fprintf(os.Stderr, "\ndone: +%d new, %d changed, %d re-embedded (model change), %d skipped, %d deleted (%d chunks this run)\n",
-		stats.New, stats.Changed, stats.Remodeled, stats.Skipped, stats.Deleted, stats.Chunks)
+	fmt.Fprintf(os.Stderr, "\ndone: +%d new, %d appended, %d changed, %d re-embedded (model change), %d skipped, %d deleted (%d chunks this run)\n",
+		stats.New, stats.Appended, stats.Changed, stats.Remodeled, stats.Skipped, stats.Deleted, stats.Chunks)
 	fmt.Fprintf(os.Stderr, "index now holds %d sessions/files, %d chunks\n", files, chunks)
 	if mc, err := st.ModelCounts(); err == nil && len(mc) > 1 {
 		fmt.Fprintf(os.Stderr, "embedding models in index:\n")
@@ -307,6 +311,30 @@ func splitArgs(args []string) (flags, pos []string) {
 		pos = append(pos, a)
 	}
 	return
+}
+
+// lockIndex makes `recall index` single-instance. Two passes over the same DB
+// would embed the same files twice and contend on SQLite's write lock: a
+// manual run alongside the scheduled one, say, or a GUI client's refresh. The
+// lock is a flock on a file next to the DB, so the kernel drops it when the
+// process exits, however it exits.
+func lockIndex() (unlock func()) {
+	dbPath, err := store.DefaultPath()
+	if err != nil {
+		fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(filepath.Dir(dbPath), "index.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		fatal(err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			fatal(fmt.Errorf("another `recall index` is already running"))
+		}
+		fatal(err)
+	}
+	return func() { f.Close() }
 }
 
 func openStore() *store.Store {

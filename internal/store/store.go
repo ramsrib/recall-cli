@@ -145,6 +145,12 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("backfill %s.%s: %w", c.table, c.col, err)
 		}
 	}
+	// files.cursor is where the last parse of the file stopped (an opaque JSON
+	// blob owned by internal/index), so a grown transcript embeds only its new
+	// tail. NULL just means the next change re-reads the file from the start.
+	if err := s.ensureColumn("files", "cursor", "TEXT"); err != nil {
+		return err
+	}
 	// Index now that the column is guaranteed to exist.
 	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_chunks_model ON chunks(embed_model)`)
 	return err
@@ -198,10 +204,11 @@ type FileMeta struct {
 	MtimeNs    int64
 	Size       int64
 	EmbedModel string
+	Cursor     string // JSON owned by internal/index; "" if never recorded
 }
 
 func (s *Store) Manifest() (map[string]FileMeta, error) {
-	rows, err := s.db.Query(`SELECT path, mtime_ns, size, COALESCE(embed_model,'') FROM files`)
+	rows, err := s.db.Query(`SELECT path, mtime_ns, size, COALESCE(embed_model,''), COALESCE(cursor,'') FROM files`)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +217,7 @@ func (s *Store) Manifest() (map[string]FileMeta, error) {
 	for rows.Next() {
 		var p string
 		var fm FileMeta
-		if err := rows.Scan(&p, &fm.MtimeNs, &fm.Size, &fm.EmbedModel); err != nil {
+		if err := rows.Scan(&p, &fm.MtimeNs, &fm.Size, &fm.EmbedModel, &fm.Cursor); err != nil {
 			return nil, err
 		}
 		m[p] = fm
@@ -226,18 +233,49 @@ type Chunk struct {
 	Embedding                                     []float32
 }
 
+// FileUpdate is one file's new manifest row plus the chunks to insert for it.
+type FileUpdate struct {
+	Path, Source, EmbedModel string
+	MtimeNs, Size, IndexedAt int64
+	Cursor                   string
+	Chunks                   []Chunk
+}
+
 // ReplaceFile atomically swaps all chunks for a file and updates its manifest
-// row. embedModel records the model that produced these chunks' embeddings, so
+// row. EmbedModel records the model that produced these chunks' embeddings, so
 // a later model switch can reconcile this file on its own (and the query path
 // can rank only same-model vectors).
-func (s *Store) ReplaceFile(path, source, embedModel string, mtimeNs, size, indexedAt int64, chunks []Chunk) error {
+func (s *Store) ReplaceFile(u FileUpdate) error {
+	return s.writeFile(u, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DELETE FROM chunks WHERE file_path=?`, u.Path)
+		return err
+	})
+}
+
+// AppendFile atomically adds the chunks for text appended to an indexed file,
+// keeping the chunks it already has, and updates its manifest row. A non-empty
+// retitle also renames the file's existing chunks, for when the appended part
+// retitled the session.
+func (s *Store) AppendFile(u FileUpdate, retitle string) error {
+	return s.writeFile(u, func(tx *sql.Tx) error {
+		if retitle == "" {
+			return nil
+		}
+		_, err := tx.Exec(`UPDATE chunks SET title=? WHERE file_path=?`, retitle, u.Path)
+		return err
+	})
+}
+
+// writeFile runs prepare, inserts u.Chunks and upserts the manifest row in one
+// transaction.
+func (s *Store) writeFile(u FileUpdate, prepare func(*sql.Tx) error) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`DELETE FROM chunks WHERE file_path=?`, path); err != nil {
+	if err := prepare(tx); err != nil {
 		return err
 	}
 	stmt, err := tx.Prepare(`INSERT INTO chunks
@@ -247,19 +285,19 @@ func (s *Store) ReplaceFile(path, source, embedModel string, mtimeNs, size, inde
 		return err
 	}
 	defer stmt.Close()
-	for _, c := range chunks {
-		if _, err := stmt.Exec(path, c.Source, c.SessionID, c.Project, c.Title,
-			c.Ts, c.Role, c.Text, encodeVec(c.Embedding), embedModel); err != nil {
+	for _, c := range u.Chunks {
+		if _, err := stmt.Exec(u.Path, c.Source, c.SessionID, c.Project, c.Title,
+			c.Ts, c.Role, c.Text, encodeVec(c.Embedding), u.EmbedModel); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO files(path, source, mtime_ns, size, indexed_at, embed_model)
-		VALUES(?,?,?,?,?,?)
+	if _, err := tx.Exec(`INSERT INTO files(path, source, mtime_ns, size, indexed_at, embed_model, cursor)
+		VALUES(?,?,?,?,?,?,?)
 		ON CONFLICT(path) DO UPDATE SET
 			source=excluded.source, mtime_ns=excluded.mtime_ns,
 			size=excluded.size, indexed_at=excluded.indexed_at,
-			embed_model=excluded.embed_model`,
-		path, source, mtimeNs, size, indexedAt, embedModel); err != nil {
+			embed_model=excluded.embed_model, cursor=excluded.cursor`,
+		u.Path, u.Source, u.MtimeNs, u.Size, u.IndexedAt, u.EmbedModel, u.Cursor); err != nil {
 		return err
 	}
 	return tx.Commit()

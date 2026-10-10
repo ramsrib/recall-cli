@@ -106,7 +106,8 @@ CREATE TABLE files (              -- the freshness manifest
   mtime_ns    INTEGER NOT NULL,   -- stat mtime in unix nanos
   size        INTEGER NOT NULL,
   indexed_at  INTEGER NOT NULL,
-  embed_model TEXT                -- model that produced this file's vectors
+  embed_model TEXT,               -- model that produced this file's vectors
+  cursor      TEXT                -- JSON: where the last parse stopped (see APPENDED below)
 );
 
 CREATE TABLE chunks (             -- the search index (a derived artifact)
@@ -201,20 +202,32 @@ analytics, and "what did I search for" history. Inspect with `recall log`; clear
 1. Enumerate session files from both adapters.
 2. For each file, stat() → (mtime_ns, size) and compare against the manifest:
      • not in files                       → NEW       → index
-     • mtime/size differ                  → CHANGED   → reindex
+     • grew, and the cursor still matches → APPENDED  → index only the new tail
+     • mtime/size differ otherwise        → CHANGED   → reindex
      • content same, embed_model differs  → REMODELED → re-embed (model switch)
      • content same, embed_model same     → SKIP
 3. Files in table but missing on disk → delete their chunks + row.
 4. Indexing one file (one txn):
-     DELETE FROM chunks WHERE file_path=?      (FTS5 trigger cleans the index)
-     adapter parse → records → chunk to ~512-token windows
+     DELETE FROM chunks WHERE file_path=?      (FTS5 trigger cleans the index; not for APPENDED)
+     adapter parse from the cursor (or the start) → records → chunk to ~512-token windows
      embed each chunk via Ollama (conditioning is model-aware — see below)
      INSERT chunks(... embed_model = current model)
-     UPSERT files(path, source, mtime_ns, size, indexed_at=now, embed_model)
+     UPSERT files(path, source, mtime_ns, size, indexed_at=now, embed_model, cursor)
 ```
 
 Re-runs after a few new sessions touch only those files. Embedding dominates first-run time
 (one-time); incremental runs are near-instant.
+
+**Live sessions are appended to, not re-embedded.** Transcripts are append-only, and the one a
+session is writing changes between every pass; a long one runs to tens of MB and thousands of
+chunks. The cursor records the byte offset the last parse consumed (always the end of a complete
+line), a hash of the 4 KB before it, and the session context a tail can't see on its own (Codex's
+session id, cwd and start time, and the title). When the file has grown and that hash still
+matches, only the bytes after the offset are parsed and embedded. A changed title is written onto
+the file's existing chunks. Anything else (a mismatched hash, a truncated file, a model switch, a
+cursor written for a different mtime by a build that predates cursors) falls back to a full
+reindex. `recall index` holds an exclusive `flock` on `index.lock` next to the DB, so overlapping
+runs refuse instead of embedding the same files twice.
 
 **Embedding-model tracking.** Each file (and its chunks) records the model that produced its
 vectors. `meta.embed_model` holds the *current* model — the one a query embeds with by default
