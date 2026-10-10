@@ -25,10 +25,10 @@ type codexMessage struct {
 	} `json:"content"`
 }
 
-func parseCodex(path string, cur Cursor) ([]Record, Cursor, error) {
+func parseCodex(ls *lines, cur Cursor) ([]Record, Cursor, error) {
 	var recs []Record
 	next := cur
-	end, err := scanLines(path, cur.Offset, func(line []byte) {
+	err := ls.each(func(line []byte) {
 		var l codexLine
 		if json.Unmarshal(line, &l) != nil {
 			return
@@ -67,7 +67,6 @@ func parseCodex(path string, cur Cursor) ([]Record, Cursor, error) {
 			})
 		}
 	})
-	next.Offset = end
 
 	// Codex has no ai-title; derive one from the first "real" user message
 	// (skip injected AGENTS.md / instruction blocks). Once found it sticks, so

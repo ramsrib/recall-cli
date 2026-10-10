@@ -51,12 +51,15 @@ func TestParseFromResumesAppendedClaudeTranscript(t *testing.T) {
 
 	// The tail renames the session and adds one message; only that message comes back.
 	appendFile(t, path, `{"type":"ai-title","aiTitle":"Second"}`+"\n"+claudeMsg("user", "three"))
-	if !cur.Resumable(path, size(t, path)) {
-		t.Fatal("appended file should be resumable")
-	}
 	recs, next, err := ParseFrom(sf, cur)
 	if err != nil || len(recs) != 1 || recs[0].Text != "three" || recs[0].Title != "Second" || next.Title != "Second" {
 		t.Fatalf("tail parse: recs=%v next=%+v err=%v", texts(recs), next, err)
+	}
+
+	// The cursor a tail parse returns must equal the one a full parse would.
+	_, full, _ := ParseFrom(sf, Cursor{})
+	if next != full {
+		t.Fatalf("tail cursor %+v != full cursor %+v", next, full)
 	}
 }
 
@@ -80,23 +83,27 @@ func TestParseFromLeavesPartialLastLine(t *testing.T) {
 	}
 }
 
-func TestResumableRejectsRewrittenFile(t *testing.T) {
+func TestParseFromRejectsRewrittenFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s1.jsonl")
 	sf := SessionFile{Path: path, Source: "claude"}
-	appendFile(t, path, claudeMsg("user", "one"))
+	// Enough after the first message that a rewrite of it is far from the cursor.
+	var tail string
+	for range 200 {
+		tail += claudeMsg("assistant", "filler")
+	}
+	appendFile(t, path, claudeMsg("user", "one")+tail)
 	_, cur, _ := ParseFrom(sf, Cursor{})
 
-	if err := os.WriteFile(path, []byte(claudeMsg("user", "ONE")+claudeMsg("user", "two")), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if cur.Resumable(path, size(t, path)) {
-		t.Fatal("rewritten file must not be resumable")
-	}
-	if err := os.WriteFile(path, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if cur.Resumable(path, 0) {
-		t.Fatal("truncated file must not be resumable")
+	for name, content := range map[string]string{
+		"early same-length rewrite": claudeMsg("user", "ONE") + tail + claudeMsg("user", "two"),
+		"truncated":                 "",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := ParseFrom(sf, cur); err != ErrRewritten {
+			t.Fatalf("%s: err=%v, want ErrRewritten", name, err)
+		}
 	}
 }
 

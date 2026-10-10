@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -203,12 +204,13 @@ func (s *Store) SetMeta(key, value string) error {
 type FileMeta struct {
 	MtimeNs    int64
 	Size       int64
+	IndexedAt  int64
 	EmbedModel string
 	Cursor     string // JSON owned by internal/index; "" if never recorded
 }
 
 func (s *Store) Manifest() (map[string]FileMeta, error) {
-	rows, err := s.db.Query(`SELECT path, mtime_ns, size, COALESCE(embed_model,''), COALESCE(cursor,'') FROM files`)
+	rows, err := s.db.Query(`SELECT path, mtime_ns, size, indexed_at, COALESCE(embed_model,''), COALESCE(cursor,'') FROM files`)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +219,7 @@ func (s *Store) Manifest() (map[string]FileMeta, error) {
 	for rows.Next() {
 		var p string
 		var fm FileMeta
-		if err := rows.Scan(&p, &fm.MtimeNs, &fm.Size, &fm.EmbedModel, &fm.Cursor); err != nil {
+		if err := rows.Scan(&p, &fm.MtimeNs, &fm.Size, &fm.IndexedAt, &fm.EmbedModel, &fm.Cursor); err != nil {
 			return nil, err
 		}
 		m[p] = fm
@@ -252,12 +254,27 @@ func (s *Store) ReplaceFile(u FileUpdate) error {
 	})
 }
 
+// ErrStale means a file's manifest row changed after it was read, so chunks
+// computed from that reading must not be applied.
+var ErrStale = errors.New("file was re-indexed concurrently")
+
 // AppendFile atomically adds the chunks for text appended to an indexed file,
 // keeping the chunks it already has, and updates its manifest row. A non-empty
 // retitle also renames the file's existing chunks, for when the appended part
-// retitled the session.
-func (s *Store) AppendFile(u FileUpdate, retitle string) error {
+// retitled the session. prev is the row the append was computed from; if the
+// row has changed since (another recall, possibly one that predates cursors,
+// re-indexed the file meanwhile), nothing is written and ErrStale is returned.
+func (s *Store) AppendFile(u FileUpdate, prev FileMeta, retitle string) error {
 	return s.writeFile(u, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM files WHERE path=? AND mtime_ns=? AND size=?
+			AND indexed_at=? AND COALESCE(embed_model,'')=? AND COALESCE(cursor,'')=?`,
+			u.Path, prev.MtimeNs, prev.Size, prev.IndexedAt, prev.EmbedModel, prev.Cursor).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrStale
+		}
 		if retitle == "" {
 			return nil
 		}

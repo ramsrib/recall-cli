@@ -221,12 +221,13 @@ Re-runs after a few new sessions touch only those files. Embedding dominates fir
 **Live sessions are appended to, not re-embedded.** Transcripts are append-only, and the one a
 session is writing changes between every pass; a long one runs to tens of MB and thousands of
 chunks. The cursor records the byte offset the last parse consumed (always the end of a complete
-line), a hash of the 4 KB before it, and the session context a tail can't see on its own (Codex's
-session id, cwd and start time, and the title). When the file has grown and that hash still
-matches, only the bytes after the offset are parsed and embedded. A changed title is written onto
-the file's existing chunks. Anything else (a mismatched hash, a truncated file, a model switch, a
-cursor written for a different mtime by a build that predates cursors) falls back to a full
-reindex. `recall index` holds an exclusive `flock` on `index.lock` next to the DB, so overlapping
+line), a SHA-256 of every byte before it, the manifest row it was written with, and the session
+context a tail can't see on its own (Codex's session id, cwd and start time, and the title). When
+the file still begins with exactly those bytes, only what follows is parsed and embedded;
+verifying the prefix is one sequential read, far cheaper than parsing it. A changed title is
+written onto the file's existing chunks. Anything else (a rewritten or truncated file, a model
+switch, a row rewritten by a build that predates cursors) falls back to a full reindex, and an
+append whose manifest row changed while it was embedding is dropped rather than applied. `recall index` holds an exclusive `flock` on `index.lock` next to the DB, so overlapping
 runs refuse instead of embedding the same files twice.
 
 **Embedding-model tracking.** Each file (and its chunks) records the model that produced its

@@ -19,10 +19,10 @@ type claudeMessage struct {
 	Content json.RawMessage `json:"content"`
 }
 
-func parseClaude(path string, cur Cursor) ([]Record, Cursor, error) {
+func parseClaude(ls *lines, cur Cursor) ([]Record, Cursor, error) {
 	var recs []Record
 	next := cur
-	end, err := scanLines(path, cur.Offset, func(line []byte) {
+	err := ls.each(func(line []byte) {
 		var l claudeLine
 		if json.Unmarshal(line, &l) != nil {
 			return
@@ -47,7 +47,6 @@ func parseClaude(path string, cur Cursor) ([]Record, Cursor, error) {
 			Text:      text,
 		})
 	})
-	next.Offset = end
 	for i := range recs {
 		recs[i].Title = next.Title
 	}

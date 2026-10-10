@@ -3,6 +3,7 @@ package index
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -18,17 +19,19 @@ const maxChunkRunes = 2000
 // embedBatch is how many chunks we send to Ollama per request.
 const embedBatch = 64
 
-// Stats counts files by what a pass did with them. Appended files grew and had
-// only their new tail embedded; Changed files were re-read in full.
-// fileCursor is what files.cursor holds: the parse cursor plus the mtime of
-// the manifest row it was written with. A recall build that predates cursors
-// re-indexes a file without touching this column, so a cursor whose mtime no
-// longer matches its row is stale and must not be resumed from.
+// fileCursor is what files.cursor holds: the parse cursor plus the manifest
+// row it was written with. A recall build that predates cursors re-indexes a
+// file without touching this column, so a cursor whose row has since changed
+// is stale and must not be resumed from.
 type fileCursor struct {
 	adapter.Cursor
-	MtimeNs int64 `json:"mtime_ns"`
+	MtimeNs   int64 `json:"mtime_ns"`
+	Size      int64 `json:"size"`
+	IndexedAt int64 `json:"indexed_at"`
 }
 
+// Stats counts files by what a pass did with them. Appended files grew and had
+// only their new tail embedded; Changed files were re-read in full.
 type Stats struct {
 	New, Appended, Changed, Remodeled, Skipped, Deleted, Chunks int
 }
@@ -38,8 +41,8 @@ type Stats struct {
 // Each file records the embedding model that produced its vectors. A file is
 // re-embedded when its content changed (mtime/size) OR when it was indexed
 // under a different model than the one in use now. A file that only grew is
-// embedded from where the last pass stopped (see adapter.Cursor). The model switch is handled
-// per-file rather than as one global wipe, so it is incremental and resumable:
+// embedded from where the last pass stopped (see adapter.Cursor). The model
+// switch is handled per-file rather than as one global wipe, so it is incremental and resumable:
 // an interrupted migration just leaves some files on the old model, and the
 // query path simply won't rank those until a later pass brings them over.
 func Run(st *store.Store, em *embed.Client, now int64, log func(string)) (Stats, error) {
@@ -87,13 +90,17 @@ func Run(st *store.Store, em *embed.Client, now int64, log func(string)) (Stats,
 		// else (a rewrite, a model switch, no cursor yet) re-reads the file.
 		var fc fileCursor
 		appending := indexed && modelSame && m.Cursor != "" &&
-			json.Unmarshal([]byte(m.Cursor), &fc) == nil && fc.MtimeNs == m.MtimeNs &&
-			fc.Resumable(sf.Path, sz)
+			json.Unmarshal([]byte(m.Cursor), &fc) == nil &&
+			fc.MtimeNs == m.MtimeNs && fc.Size == m.Size && fc.IndexedAt == m.IndexedAt
 		cur := adapter.Cursor{}
 		if appending {
 			cur = fc.Cursor
 		}
 		recs, next, err := adapter.ParseFrom(sf, cur)
+		if errors.Is(err, adapter.ErrRewritten) {
+			appending, cur = false, adapter.Cursor{}
+			recs, next, err = adapter.ParseFrom(sf, cur)
+		}
 		if err != nil {
 			log(fmt.Sprintf("skip %s: %v", sf.Path, err))
 			continue
@@ -102,7 +109,7 @@ func Run(st *store.Store, em *embed.Client, now int64, log func(string)) (Stats,
 		if err := embedChunks(em, chunks); err != nil {
 			return stats, fmt.Errorf("embed %s: %w", sf.Path, err)
 		}
-		cursor, err := json.Marshal(fileCursor{Cursor: next, MtimeNs: mt})
+		cursor, err := json.Marshal(fileCursor{Cursor: next, MtimeNs: mt, Size: sz, IndexedAt: now})
 		if err != nil {
 			return stats, err
 		}
@@ -115,9 +122,13 @@ func Run(st *store.Store, em *embed.Client, now int64, log func(string)) (Stats,
 			if next.Title != cur.Title {
 				retitle = next.Title
 			}
-			err = st.AppendFile(u, retitle)
+			err = st.AppendFile(u, m, retitle)
 		} else {
 			err = st.ReplaceFile(u)
+		}
+		if errors.Is(err, store.ErrStale) {
+			log(fmt.Sprintf("skip %s: %v; the next pass picks it up", sf.Path, err))
+			continue
 		}
 		if err != nil {
 			return stats, err

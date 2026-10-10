@@ -8,7 +8,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"os"
@@ -96,10 +98,9 @@ func Parse(sf SessionFile) ([]Record, error) {
 // cost this avoids.
 type Cursor struct {
 	Offset int64 `json:"offset"` // bytes consumed: always just past a complete line
-	// TailHash is a hash of the bytes just before Offset. If they no longer
-	// match, the file was rewritten rather than appended to, and the caller
-	// must re-parse from the start.
-	TailHash string `json:"tail_hash"`
+	// PrefixHash is a SHA-256 of bytes [0, Offset). If the file no longer
+	// starts with them, it was rewritten rather than appended to.
+	PrefixHash string `json:"prefix_hash"`
 
 	// Session context a tail parse cannot see. Codex states the session id,
 	// cwd and start time once, in the session_meta line at the top; the title
@@ -110,85 +111,71 @@ type Cursor struct {
 	Title     string `json:"title,omitempty"`
 }
 
+// ErrRewritten means a file no longer starts with what its cursor consumed, so
+// it has to be parsed from the start.
+var ErrRewritten = errors.New("transcript was rewritten, not appended to")
+
 // ParseFrom parses the records appended after cur (from the start for a zero
 // Cursor) and returns the cursor for the next pass. Every returned record
 // carries next.Title, which may differ from cur.Title when the tail renamed
-// the session.
+// the session. It returns ErrRewritten if the file no longer begins with the
+// bytes cur consumed. Checking that costs one sequential read of the prefix,
+// far less than parsing it.
 func ParseFrom(sf SessionFile, cur Cursor) (recs []Record, next Cursor, err error) {
+	f, err := os.Open(sf.Path)
+	if err != nil {
+		return nil, cur, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if cur.Offset > 0 {
+		if _, err := io.CopyN(h, f, cur.Offset); err != nil || hex.EncodeToString(h.Sum(nil)) != cur.PrefixHash {
+			return nil, cur, ErrRewritten
+		}
+	}
+	ls := &lines{r: bufio.NewReaderSize(f, 1<<20), h: h, end: cur.Offset}
 	switch sf.Source {
 	case "claude":
-		recs, next, err = parseClaude(sf.Path, cur)
+		recs, next, err = parseClaude(ls, cur)
 	case "codex":
-		recs, next, err = parseCodex(sf.Path, cur)
+		recs, next, err = parseCodex(ls, cur)
 	default:
 		return nil, cur, fmt.Errorf("unknown source %q", sf.Source)
 	}
 	if err != nil {
 		return nil, cur, err
 	}
-	if next.TailHash, err = tailHash(sf.Path, next.Offset); err != nil {
-		return nil, cur, err
-	}
+	next.Offset, next.PrefixHash = ls.end, hex.EncodeToString(h.Sum(nil))
 	return recs, next, nil
 }
 
-// Resumable reports whether path still begins with the bytes cur consumed, so
-// a pass can parse from cur.Offset instead of from the start.
-func (cur Cursor) Resumable(path string, size int64) bool {
-	if cur.Offset <= 0 || cur.TailHash == "" || size < cur.Offset {
-		return false
-	}
-	h, err := tailHash(path, cur.Offset)
-	return err == nil && h == cur.TailHash
+// lines reads a transcript onward from a cursor's offset, adding every byte it
+// consumes to the prefix hash.
+type lines struct {
+	r   *bufio.Reader
+	h   hash.Hash
+	end int64 // offset just past the last consumed line
 }
 
-// tailWindow is how many bytes before a cursor's offset its hash covers.
-const tailWindow = 4096
-
-func tailHash(path string, offset int64) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	start := max(offset-tailWindow, 0)
-	buf := make([]byte, offset-start)
-	if _, err := f.ReadAt(buf, start); err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(buf)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-// scanLines calls fn with each complete line of path from byte offset from
-// onward, and returns the offset just past the last line it consumed.
-func scanLines(path string, from int64, fn func(line []byte)) (int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return from, err
-	}
-	defer f.Close()
-	if _, err := f.Seek(from, io.SeekStart); err != nil {
-		return from, err
-	}
-	r := bufio.NewReaderSize(f, 1<<20)
-	end := from
+// each calls fn with every complete line left in the file.
+func (l *lines) each(fn func(line []byte)) error {
 	for {
-		line, err := r.ReadBytes('\n')
+		line, err := l.r.ReadBytes('\n')
 		if len(line) > 0 {
 			// An unterminated last line may be a record still being written.
 			// Take it only once it parses; otherwise leave it for the next pass.
 			if line[len(line)-1] != '\n' && !json.Valid(line) {
-				return end, nil
+				return nil
 			}
-			end += int64(len(line))
+			l.h.Write(line)
+			l.end += int64(len(line))
 			fn(bytes.TrimRight(line, "\r\n"))
 		}
 		if err == io.EOF {
-			return end, nil
+			return nil
 		}
 		if err != nil {
-			return end, err
+			return err
 		}
 	}
 }
