@@ -15,6 +15,9 @@ import (
 // this registry, so new sessions appear without an embedding reindex. It stops
 // early, returning ctx.Err(), if ctx is cancelled.
 func RefreshSessions(ctx context.Context, st *store.Store) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	files, err := adapter.Discover()
 	if err != nil {
 		return err
@@ -50,6 +53,9 @@ func RefreshSessions(ctx context.Context, st *store.Store) error {
 			FirstTs: info.FirstTs, LastTs: fi.ModTime().Unix(), MsgCount: info.MsgCount,
 			Mode: info.Mode, MtimeNs: mt, Size: sz,
 		})
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return st.PruneSessions(present)
 }

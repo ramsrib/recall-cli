@@ -344,9 +344,12 @@ func (p *progress) Finished(i int, f index.FileStat) {
 	p.println(fmt.Sprintf("  %s  %-9s %14s %7s  %s", p.counter(i), f.How, what, fmtDur(f.Took), trimHome(f.Path)))
 }
 
+// Note comes between files: before the first, after the last, or in place of
+// Finished for a file that was skipped. Either way no file is in flight.
 func (p *progress) Note(msg string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.active = false
 	p.println("  note: " + msg)
 }
 
