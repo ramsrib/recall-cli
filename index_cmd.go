@@ -37,7 +37,13 @@ func runIndex(args []string) {
 	history := fs.Bool("history", false, "list recent index runs instead of indexing")
 	limit := fs.Int("limit", 20, "with --history: max runs")
 	pretty := fs.Bool("pretty", false, "with --history: human-readable table (default output is compact JSON)")
+	asJSON := fs.Bool("json", false, "print the run record to stdout even when stdout is a terminal")
 	_ = fs.Parse(args)
+	// The run record is for machines: printed when stdout is a pipe or file
+	// (a script, an agent, a log), not onto a person's terminal, where it would
+	// land in the middle of the progress output. --json forces it, for agents
+	// whose harness runs commands in a pseudo-terminal.
+	emitRecord = *asJSON || !isTerminal(os.Stdout)
 	if *history {
 		runIndexHistory(*limit, *pretty)
 		return
@@ -132,10 +138,13 @@ func failRun(st *store.Store, run *store.IndexRun, start time.Time, err error) {
 	fatal(err)
 }
 
+// emitRecord says whether finishRun prints the run record (see runIndex).
+var emitRecord bool
+
 // finishRun stamps the run's duration, records it if st is non-nil
-// (best-effort: a failure to log must not change the run's outcome), and
-// prints it to stdout as compact JSON for scripts and agents. Progress and
-// the summary go to stderr.
+// (best-effort: a failure to log must not change the run's outcome), and,
+// when emitRecord is set, prints it to stdout as compact JSON for scripts and
+// agents. Progress and the summary go to stderr.
 func finishRun(st *store.Store, run *store.IndexRun, start time.Time) {
 	run.DurationMs = time.Since(start).Milliseconds()
 	if st != nil {
@@ -143,7 +152,9 @@ func finishRun(st *store.Store, run *store.IndexRun, start time.Time) {
 			fmt.Fprintln(os.Stderr, "recall: warning: failed to log index run: "+err.Error())
 		}
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(run)
+	if emitRecord {
+		_ = json.NewEncoder(os.Stdout).Encode(run)
+	}
 }
 
 // summarize prints the end-of-run summary to stderr.
@@ -152,10 +163,23 @@ func summarize(st *store.Store, run store.IndexRun, model string) {
 	if run.EmbedMs > 0 {
 		took += " (" + fmtDur(time.Duration(run.EmbedMs)*time.Millisecond) + " embedding)"
 	}
-	fmt.Fprintf(os.Stderr, "\n%s in %s: %s new, %s appended, %s changed, %s re-embedded (model change), %s unchanged, %s deleted · %s chunks embedded\n",
+	// Only the counts that happened; "unchanged" always, as the denominator.
+	var parts []string
+	for _, c := range []struct {
+		n    int
+		what string
+	}{
+		{run.New, "new"}, {run.Appended, "appended"}, {run.Changed, "changed"},
+		{run.Remodeled, "re-embedded (model change)"}, {run.Deleted, "deleted"},
+	} {
+		if c.n > 0 {
+			parts = append(parts, fmtInt(c.n)+" "+c.what)
+		}
+	}
+	parts = append(parts, fmtInt(run.Skipped)+" unchanged")
+	fmt.Fprintf(os.Stderr, "\n%s in %s: %s · %s embedded\n",
 		map[string]string{"ok": "done", "interrupted": "stopped", "error": "failed"}[run.Status], took,
-		fmtInt(run.New), fmtInt(run.Appended), fmtInt(run.Changed), fmtInt(run.Remodeled),
-		fmtInt(run.Skipped), fmtInt(run.Deleted), fmtInt(run.Chunks))
+		strings.Join(parts, ", "), plural(run.Chunks, "chunk"))
 	files, chunks := mustCounts(st)
 	fmt.Fprintf(os.Stderr, "index holds %s sessions, %s chunks\n", fmtInt(files), fmtInt(chunks))
 	if mc, err := st.ModelCounts(); err == nil && len(mc) > 1 {
@@ -337,8 +361,11 @@ func (p *progress) Finished(i int, f index.FileStat) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.active = false
-	what := fmtInt(f.Chunks) + " chunks"
-	if f.How == "appended" {
+	what := plural(f.Chunks, "chunk")
+	switch {
+	case f.How == "appended" && f.Chunks == 0: // grew, but only by tool calls and the like
+		what = "no new text"
+	case f.How == "appended":
 		what = "+" + what
 	}
 	p.println(fmt.Sprintf("  %s  %-9s %14s %7s  %s", p.counter(i), f.How, what, fmtDur(f.Took), trimHome(f.Path)))
@@ -427,6 +454,14 @@ func fitWidth(s string, width int) string {
 	keep := width - 2
 	head := keep * 2 / 3
 	return string(r[:head]) + "…" + string(r[len(r)-(keep-head):])
+}
+
+// plural formats a count with its noun: "1 chunk", "1,048 chunks".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmtInt(n) + " " + noun + "s"
 }
 
 func fmtDur(d time.Duration) string {

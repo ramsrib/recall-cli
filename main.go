@@ -68,9 +68,11 @@ func usage() {
 	fmt.Fprint(os.Stderr, `recall — search Claude Code + Codex session history
 
 Usage:
-  recall index [--model NAME]   embed new/changed sessions; progress on stderr, the
-                                run record as JSON on stdout. Exit 75: another index
-                                run is in progress; 130: interrupted (work so far kept)
+  recall index [--model NAME] [--json]
+                                embed new/changed sessions; progress on stderr. When
+                                stdout isn't a terminal (or with --json), the run record
+                                goes there as JSON. Exit 75: another index run is in
+                                progress; 130: interrupted (work so far kept)
   recall index --history [--limit N] [--pretty]   recent index runs: timing, counts,
                                 slowest files (every run is logged, whoever starts it)
   recall "QUERY" [--mode hybrid|semantic|lexical] [--source claude|codex]

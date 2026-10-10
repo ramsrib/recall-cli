@@ -118,8 +118,10 @@ deleted from disk are dropped from the index.
   (`[3/23] embedding 1,280/5,468 chunks (23%)`) and every finished file gets a line of
   its own. Anywhere else (an agent, a log, a GUI client) it prints plain lines: one
   per finished file, plus a heartbeat every 15s while a large file is embedding.
-- The run's record goes to stdout as compact JSON: status, duration, time spent
-  embedding, counts, and the slowest files.
+- When stdout is not a terminal (a script, an agent, a log), the run's record goes
+  there as compact JSON: status, duration, time spent embedding, counts, and the
+  slowest files. In a terminal it is left out so it doesn't land in the middle of the
+  progress output; `--json` prints it anyway.
 - Ctrl-C stops between embedding batches and keeps every file already finished (exit 130).
   If another `recall index` is running, it exits 75 without doing anything.
 

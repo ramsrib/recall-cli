@@ -247,8 +247,9 @@ append whose manifest row changed while it was embedding is dropped rather than 
 `index.lock` next to the DB (the holder writes its pid there), so an overlapping run exits 75
 instead of embedding the same files twice. Each file commits in its own transaction, so Ctrl-C
 (checked between embedding batches, and cancelling the request in flight) keeps every finished
-file. Whatever the outcome, the run is written to `index_runs` and printed to stdout as JSON;
-progress goes to stderr, as one rewritten line on a terminal and as sparse plain lines anywhere
+file. Whatever the outcome, the run is written to `index_runs`, and printed to stdout as JSON
+unless stdout is a terminal (`--json` forces it): a person watching gets prose, a pipe gets
+data. Progress goes to stderr, as one rewritten line on a terminal and as sparse plain lines anywhere
 else, since agents and GUI clients read it too.
 
 **Embedding-model tracking.** Each file (and its chunks) records the model that produced its
