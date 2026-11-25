@@ -20,6 +20,9 @@ type Info struct {
 // session_meta refresh only calls this for new/changed files, so the full-parse
 // cost is paid only when a file actually changes.
 func ReadInfo(sf SessionFile) (Info, error) {
+	if sf.agy != nil {
+		return sf.agy.info, nil
+	}
 	recs, err := Parse(sf)
 	if err != nil {
 		return Info{}, err

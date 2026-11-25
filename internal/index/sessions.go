@@ -2,26 +2,25 @@ package index
 
 import (
 	"context"
-	"os"
 
 	"github.com/ramsrib/recall-cli/internal/adapter"
 	"github.com/ramsrib/recall-cli/internal/store"
 )
 
 // RefreshSessions reconciles the `sessions` registry with disk: it discovers all
-// session files, re-parses only those that are new or changed (by mtime+size),
-// and prunes rows for files that are gone. Cheap to call often (e.g. on app
-// focus) — unchanged files cost only a stat, never an open. `recall list` reads
+// sessions, re-reads metadata for new or changed sessions, and prunes rows for
+// sessions that are gone. Unchanged JSONL files cost only a stat. `recall list` reads
 // this registry, so new sessions appear without an embedding reindex. It stops
 // early, returning ctx.Err(), if ctx is cancelled.
 func RefreshSessions(ctx context.Context, st *store.Store) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	files, err := adapter.Discover()
+	files, closeSnapshots, err := adapter.Discover()
 	if err != nil {
 		return err
 	}
+	defer closeSnapshots()
 	manifest, err := st.SessionsManifest()
 	if err != nil {
 		return err
@@ -32,11 +31,10 @@ func RefreshSessions(ctx context.Context, st *store.Store) error {
 			return err
 		}
 		present[sf.Path] = true
-		fi, err := os.Stat(sf.Path)
+		mt, sz, lastTs, err := sf.Stamp()
 		if err != nil {
 			continue
 		}
-		mt, sz := fi.ModTime().UnixNano(), fi.Size()
 		if m, ok := manifest[sf.Path]; ok && m.MtimeNs == mt && m.Size == sz {
 			continue // unchanged — cache hit, no open
 		}
@@ -44,13 +42,10 @@ func RefreshSessions(ctx context.Context, st *store.Store) error {
 		if err != nil {
 			continue
 		}
-		// File mtime is the most reliable "last activity" across both tools —
-		// Codex stamps every record with the session start, so record
-		// timestamps can't give last_ts.
 		st.UpsertSession(store.SessionRow{
 			Path: sf.Path, Source: sf.Source, SessionID: info.SessionID,
 			Project: info.Project, Title: info.Title,
-			FirstTs: info.FirstTs, LastTs: fi.ModTime().Unix(), MsgCount: info.MsgCount,
+			FirstTs: info.FirstTs, LastTs: lastTs, MsgCount: info.MsgCount,
 			Mode: info.Mode, MtimeNs: mt, Size: sz,
 		})
 	}

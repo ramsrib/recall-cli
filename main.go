@@ -6,9 +6,10 @@
 //
 // Session-manager commands (list, pin, unpin, summary, resume) live in sessions_cmd.go.
 //
-// Search flags: --mode hybrid|semantic|lexical  --source claude|codex
-//               --project SUBSTR  --since YYYY-MM-DD  --limit N  --model NAME
-//               --all  --include-exec  --pretty
+// Search flags: --mode hybrid|semantic|lexical  --source claude|codex|agy
+//
+//	--project SUBSTR  --since YYYY-MM-DD  --limit N  --model NAME
+//	--all  --include-exec  --pretty
 //
 // Indexing and search are local: embeddings come from Ollama on OLLAMA_HOST
 // (localhost by default). The two ways content leaves the machine are `recall
@@ -65,7 +66,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `recall — search Claude Code + Codex session history
+	fmt.Fprint(os.Stderr, `recall — search Claude Code, Codex, and Antigravity session history
 
 Usage:
   recall index [--model NAME] [--json]
@@ -75,7 +76,7 @@ Usage:
                                 progress; 130: interrupted (work so far kept)
   recall index --history [--limit N] [--pretty]   recent index runs: timing, counts,
                                 slowest files (every run is logged, whoever starts it)
-  recall "QUERY" [--mode hybrid|semantic|lexical] [--source claude|codex]
+  recall "QUERY" [--mode hybrid|semantic|lexical] [--source claude|codex|agy]
                  [--project SUBSTR] [--since YYYY-MM-DD] [--limit N]
                  [--model NAME] [--include-exec] [--pretty]
                  (non-interactive exec/headless sessions are hidden unless --include-exec)
@@ -93,10 +94,8 @@ Session manager (also powers the recall-app desktop client):
                                 SENDS TRANSCRIPT TEXT to codex exec (network) —
                                 the only command that leaves the machine. Needs an
                                 installed + authenticated codex CLI.
-  recall resume <session-id>    PRINT (never run) the resume command + cwd. The
-                                command it prints disables the agent's safety
-                                rails (--dangerously-skip-permissions /
-                                --dangerously-bypass-approvals-and-sandbox).
+  recall resume <session-id>    PRINT (never run) the resume command + cwd.
+                                For Claude and Codex it prints their bypass flags.
 
 Models:
   index --model NAME re-embeds only files not already on NAME (incremental).
@@ -112,7 +111,7 @@ Output:
 func runSearch(args []string) {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
 	mode := fs.String("mode", "hybrid", "hybrid|semantic|lexical")
-	source := fs.String("source", "", "claude|codex")
+	source := fs.String("source", "", "claude|codex|agy")
 	project := fs.String("project", "", "substring match on project path")
 	since := fs.String("since", "", "only sessions on/after this date (YYYY-MM-DD)")
 	limit := fs.Int("limit", 20, "max results")

@@ -1,4 +1,4 @@
-// Package index performs the incremental, both-source indexing pass.
+// Package index performs the incremental indexing pass across all sources.
 package index
 
 import (
@@ -96,17 +96,17 @@ func Run(ctx context.Context, st *store.Store, em *embed.Client, now int64, p Pr
 		return stats, err
 	}
 
-	files, err := adapter.Discover()
+	files, closeSnapshots, err := adapter.Discover()
 	if err != nil {
 		return stats, err
 	}
+	defer closeSnapshots()
 	manifest, err := st.Manifest()
 	if err != nil {
 		return stats, err
 	}
 
-	// Plan first (a stat per file, nothing opened) so progress can say how
-	// much of the pass is left.
+	// Plan from the stamps so progress can say how much of the pass is left.
 	type job struct {
 		sf      adapter.SessionFile
 		mt, sz  int64
@@ -117,11 +117,10 @@ func Run(ctx context.Context, st *store.Store, em *embed.Client, now int64, p Pr
 	present := make(map[string]bool, len(files))
 	for _, sf := range files {
 		present[sf.Path] = true
-		fi, err := os.Stat(sf.Path)
+		mt, sz, _, err := sf.Stamp()
 		if err != nil {
 			continue
 		}
-		mt, sz := fi.ModTime().UnixNano(), fi.Size()
 		m, indexed := manifest[sf.Path]
 		if indexed && m.MtimeNs == mt && m.Size == sz && m.EmbedModel == em.Model {
 			stats.Skipped++
@@ -198,7 +197,7 @@ func indexFile(ctx context.Context, st *store.Store, em *embed.Client, now int64
 	// (a rewrite, a model switch, no cursor yet) re-reads the file.
 	modelSame := m.EmbedModel == em.Model
 	var fc fileCursor
-	appending := indexed && modelSame && m.Cursor != "" &&
+	appending := sf.Source != adapter.Agy && indexed && modelSame && m.Cursor != "" &&
 		json.Unmarshal([]byte(m.Cursor), &fc) == nil &&
 		fc.MtimeNs == m.MtimeNs && fc.Size == m.Size && fc.IndexedAt == m.IndexedAt &&
 		fc.Chunks == m.Chunks

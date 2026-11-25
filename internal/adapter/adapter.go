@@ -1,5 +1,5 @@
-// Package adapter discovers Claude Code and Codex session files and normalizes
-// their JSONL records into a single Record shape.
+// Package adapter discovers Claude Code, Codex and Antigravity sessions and
+// normalizes their messages into a single Record shape.
 package adapter
 
 import (
@@ -19,9 +19,9 @@ import (
 	"time"
 )
 
-// Record is one normalized message from either tool.
+// Record is one normalized message.
 type Record struct {
-	Source    string // "claude" | "codex"
+	Source    string // "claude" | "codex" | "agy"
 	SessionID string
 	Project   string // working directory the session ran in
 	Title     string // session title (whole-session)
@@ -30,17 +30,31 @@ type Record struct {
 	Text      string
 }
 
-// SessionFile is a discovered transcript on disk.
+// SessionFile identifies one transcript. For agy, Path is a database locator.
 type SessionFile struct {
 	Path   string
 	Source string
+	agy    *agySession
 }
 
-// Discover walks both tools' session directories and returns every transcript.
-func Discover() ([]SessionFile, error) {
+// Stamp returns the session's freshness key and the time of its last activity.
+func (sf SessionFile) Stamp() (mtimeNs, size, lastTs int64, err error) {
+	if sf.agy != nil {
+		return sf.agy.revision, 0, sf.agy.info.LastTs, nil
+	}
+	fi, err := os.Stat(sf.Path)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return fi.ModTime().UnixNano(), fi.Size(), fi.ModTime().Unix(), nil
+}
+
+// Discover finds all sessions. The caller closes the Antigravity snapshots
+// after it finishes reading the returned sessions.
+func Discover() ([]SessionFile, func(), error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var out []SessionFile
 
@@ -82,7 +96,11 @@ func Discover() ([]SessionFile, error) {
 			return nil
 		})
 	}
-	return out, nil
+	agy, closeSnapshots, err := discoverAgy(home)
+	if err != nil {
+		return nil, nil, err
+	}
+	return append(out, agy...), closeSnapshots, nil
 }
 
 // Parse reads a whole session file.
@@ -122,6 +140,10 @@ var ErrRewritten = errors.New("transcript was rewritten, not appended to")
 // bytes cur consumed. Checking that costs one sequential read of the prefix,
 // far less than parsing it.
 func ParseFrom(sf SessionFile, cur Cursor) (recs []Record, next Cursor, err error) {
+	if sf.agy != nil {
+		recs, err := sf.agy.records()
+		return recs, Cursor{}, err
+	}
 	f, err := os.Open(sf.Path)
 	if err != nil {
 		return nil, cur, err

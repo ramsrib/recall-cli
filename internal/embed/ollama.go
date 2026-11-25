@@ -38,7 +38,7 @@ const (
 	docPrefix   = "search_document: "
 	queryPrefix = "search_query: "
 	// qwenTask is the retrieval instruction prepended to Qwen3 queries.
-	qwenTask = "Given a search query, retrieve relevant Claude Code / Codex session transcripts."
+	qwenTask = "Given a search query, retrieve relevant Claude Code, Codex, or Antigravity session transcripts."
 )
 
 // isQwen3 reports whether the model uses Qwen3-Embedding's instruction recipe.

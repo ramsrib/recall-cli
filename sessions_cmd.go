@@ -30,6 +30,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/kballard/go-shellquote"
 	"github.com/ramsrib/recall-cli/internal/adapter"
 	"github.com/ramsrib/recall-cli/internal/index"
 	"github.com/ramsrib/recall-cli/internal/store"
@@ -39,7 +40,7 @@ import (
 
 func runList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	source := fs.String("source", "", "claude|codex")
+	source := fs.String("source", "", "claude|codex|agy")
 	project := fs.String("project", "", "substring match on project path")
 	since := fs.String("since", "", "only sessions on/after this date (YYYY-MM-DD)")
 	limit := fs.Int("limit", 0, "max sessions (0 = all)")
@@ -122,11 +123,11 @@ func runPin(args []string, pin bool) {
 		name = "unpin"
 	}
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
-	source := fs.String("source", "", "claude|codex (auto-detected if omitted)")
+	source := fs.String("source", "", "claude|codex|agy (auto-detected if omitted)")
 	flagArgs, pos := splitArgs(args)
 	_ = fs.Parse(flagArgs)
 	if len(pos) < 1 {
-		fatal(fmt.Errorf("usage: recall %s <session-id> [--source claude|codex]", name))
+		fatal(fmt.Errorf("usage: recall %s <session-id> [--source claude|codex|agy]", name))
 	}
 	id := pos[0]
 
@@ -186,13 +187,15 @@ func runResume(args []string) {
 		"source":     src,
 		"session_id": id,
 		"cwd":        cwd,
-		"command":    resumeCommand(src, id),
+		"command":    resumeCommand(src, id, cwd),
 		"path":       path,
 	})
 }
 
-func resumeCommand(source, id string) string {
+func resumeCommand(source, id, cwd string) string {
 	switch source {
+	case adapter.Agy:
+		return shellquote.Join("cd", cwd) + " && " + shellquote.Join("agy", "--conversation", id)
 	case "codex":
 		return "codex --dangerously-bypass-approvals-and-sandbox resume " + id
 	default: // claude
@@ -202,7 +205,7 @@ func resumeCommand(source, id string) string {
 
 // --- recall summary ---------------------------------------------------------
 
-const summaryPrompt = `You are summarizing a Claude Code / Codex coding-session transcript provided on stdin.
+const summaryPrompt = `You are summarizing a coding-session transcript provided on stdin.
 Goal: let me (a) recognize whether this is the session I want and (b) recall what was found/decided and what's left to do — WITHOUT re-reading it. Favor concrete outcomes, decisions, and findings over a table of contents.
 
 Output PLAIN TEXT in exactly this shape (no markdown, no preamble, keep the labels):
@@ -239,8 +242,6 @@ func runSummary(args []string) {
 	if !ok {
 		fatal(fmt.Errorf("session %q not found in index", id))
 	}
-	mtime := fileMtimeNs(path)
-
 	// Cache-only: used by the app on session open so glancing never auto-spends a
 	// codex call. Ignore staleness (mtime 0) — an actively-growing session would
 	// otherwise look stale on every open and trigger needless regeneration.
@@ -257,19 +258,19 @@ func runSummary(args []string) {
 		return
 	}
 
-	if !*refresh {
-		if cached, hit, err := st.GetSummary(src, id, mtime); err == nil && hit {
-			emitSummary(cached, src, id, true, *pretty)
-			return
-		}
+	input, cached, mtime, err := summaryInput(st, src, id, path, *refresh)
+	if err != nil {
+		fatal(err)
 	}
-
-	transcript := buildTranscriptText(path, src)
-	if strings.TrimSpace(transcript) == "" {
+	if cached {
+		emitSummary(input, src, id, true, *pretty)
+		return
+	}
+	if strings.TrimSpace(input) == "" {
 		fatal(fmt.Errorf("no readable transcript at %s", path))
 	}
 	fmt.Fprintf(os.Stderr, "summarizing %s via codex…\n", id)
-	summary, err := codexSummarize(transcript, *model)
+	summary, err := codexSummarize(input, *model)
 	if err != nil {
 		fatal(err)
 	}
@@ -277,6 +278,33 @@ func runSummary(args []string) {
 		fmt.Fprintln(os.Stderr, "recall: warning: failed to cache summary: "+err.Error())
 	}
 	emitSummary(summary, src, id, false, *pretty)
+}
+
+func summaryInput(st *store.Store, source, id, path string, refresh bool) (string, bool, int64, error) {
+	sf := adapter.SessionFile{Path: path, Source: source}
+	if source == adapter.Agy {
+		var closeSnapshot func()
+		var err error
+		sf, closeSnapshot, err = adapter.OpenAgySession(path)
+		if err != nil {
+			return "", false, 0, err
+		}
+		defer closeSnapshot()
+	}
+	mtime, _, _, err := sf.Stamp()
+	if err != nil {
+		return "", false, 0, err
+	}
+	if !refresh {
+		if cached, hit, err := st.GetSummary(source, id, mtime); err == nil && hit {
+			return cached, true, mtime, nil
+		}
+	}
+	recs, err := adapter.Parse(sf)
+	if err != nil {
+		return "", false, 0, err
+	}
+	return buildTranscriptText(recs), false, mtime, nil
 }
 
 func emitSummary(summary, source, id string, cached, pretty bool) {
@@ -292,11 +320,7 @@ func emitSummary(summary, source, id string, cached, pretty bool) {
 // buildTranscriptText renders a session's messages into a plain-text conversation
 // for the summarizer, capped (keeping head + tail) so long sessions stay within
 // the model's context — the start and end matter most for a glance summary.
-func buildTranscriptText(path, source string) string {
-	recs, err := adapter.Parse(adapter.SessionFile{Path: path, Source: source})
-	if err != nil {
-		return ""
-	}
+func buildTranscriptText(recs []adapter.Record) string {
 	var b strings.Builder
 	for _, r := range recs {
 		b.WriteString(strings.ToUpper(r.Role))
@@ -368,14 +392,6 @@ func resolveBin(name string, candidates ...string) string {
 		return p
 	}
 	return ""
-}
-
-func fileMtimeNs(path string) int64 {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return fi.ModTime().UnixNano()
 }
 
 func lastLines(s string, n int) string {

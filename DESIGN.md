@@ -1,7 +1,7 @@
 # recall — design
 
-A local-first CLI that indexes **Claude Code** and **Codex** session transcripts and
-searches them with **hybrid (semantic + full-text)** ranking.
+A local-first CLI that indexes **Claude Code**, **Codex**, and **Google Antigravity**
+sessions and searches them with **hybrid (semantic + full-text)** ranking.
 
 **Local-first, not local-only.** Indexing and every search path run on-machine against a
 local Ollama, and no conversation content leaves the box on those paths. Two escape
@@ -15,16 +15,17 @@ hatches exist and are deliberate:
 Both are documented in the README's *Privacy & network behavior* section. The design
 below concerns the local path.
 
-> Status: working tool, no tests. Eight commands: `index`, `<query>`, `log`, `list`,
+> Eight commands: `index`, `<query>`, `log`, `list`,
 > `pin`, `unpin`, `summary`, `resume` (see `main.go`).
 
 ---
 
 ## Why this exists
 
-Both Claude Code and Codex write every session to disk as JSONL. That history is a goldmine
+Claude Code and Codex write sessions to disk as JSONL. Antigravity keeps conversation
+metadata and searchable text in SQLite. That history is a goldmine
 ("how did I fix the pyexpat linking?", "what was that turbopuffer tradeoff I reasoned through?")
-but there's no way to search across it. `recall` indexes both tools into one store and answers
+but there's no way to search across it. `recall` indexes all three tools into one store and answers
 natural-language or keyword queries from the terminal.
 
 ---
@@ -101,9 +102,9 @@ CREATE TABLE meta (               -- key/value; holds embed_model = the index's
 );
 
 CREATE TABLE files (              -- the freshness manifest
-  path        TEXT PRIMARY KEY,
-  source      TEXT NOT NULL,      -- 'claude' | 'codex'
-  mtime_ns    INTEGER NOT NULL,   -- stat mtime in unix nanos
+  path        TEXT PRIMARY KEY,   -- transcript file or agy database locator
+  source      TEXT NOT NULL,      -- 'claude' | 'codex' | 'agy'
+  mtime_ns    INTEGER NOT NULL,   -- stat mtime in unix nanos or agy revision
   size        INTEGER NOT NULL,
   indexed_at  INTEGER NOT NULL,
   embed_model TEXT,               -- model that produced this file's vectors
@@ -152,7 +153,7 @@ CREATE TABLE pins (               -- pinned sessions (manager UX)
 CREATE TABLE summaries (          -- `recall summary` output, cached per session
   source        TEXT NOT NULL,
   session_id    TEXT NOT NULL,
-  file_mtime_ns INTEGER NOT NULL, -- invalidates the cache when the transcript grows
+  file_mtime_ns INTEGER NOT NULL, -- transcript mtime or agy revision
   model         TEXT,
   summary       TEXT NOT NULL,
   created_at    INTEGER NOT NULL,
@@ -198,7 +199,7 @@ nowhere else, and it all lives in this same DB:
 - **`meta`** — the index's current embedding model.
 
 So "recall only mirrors what's already on disk" is *false*. `rm -rf ~/.config/recall`
-deletes all of it; nothing else is written outside that directory. Note also that `chunks`
+deletes all of it. Antigravity database snapshots are temporary. Note also that `chunks`
 holds transcript text **verbatim** — the DB is as sensitive as the transcripts it indexes.
 
 The **query log** is written best-effort after every search — non-optional, but a logging
@@ -210,11 +211,11 @@ analytics, and "what did I search for" history. Inspect with `recall log`; clear
 
 ---
 
-## `recall index` — incremental, both sources
+## `recall index` — incremental across sources
 
 ```
-1. Enumerate session files from both adapters.
-2. For each file, stat() → (mtime_ns, size) and compare against the manifest:
+1. Enumerate sessions from all adapters.
+2. For each session, compare its freshness key against the manifest:
      • not in files                       → NEW       → index
      • grew, and the cursor still matches → APPENDED  → index only the new tail
      • mtime/size differ otherwise        → CHANGED   → reindex
@@ -232,7 +233,22 @@ analytics, and "what did I search for" history. Inspect with `recall log`; clear
 Re-runs after a few new sessions touch only those files. Embedding dominates first-run time
 (one-time); incremental runs are near-instant.
 
-**Live sessions are appended to, not re-embedded.** Transcripts are append-only, and the one a
+**Antigravity (`agy`).** The adapter reads `conversation_summaries.db` from
+`~/.gemini/antigravity-cli` and `~/.gemini/antigravity`. It copies each database and any
+WAL/SHM sidecars to a private temporary directory and opens the copy with the existing
+pure-Go SQLite driver. If the live files change during the copy, recall retries the
+snapshot. The adapter reads titles and timestamps from the summary rows, takes the
+first local file URI as the workspace, and reads user and agent text from FTS.
+Prompts linked by conversation ID in `history.jsonl` supply user text when FTS has
+none and can fill in missing workspace and timestamp metadata.
+
+Each conversation uses a `conversation_summaries.db#<conversation-id>` locator and
+a revision derived from its own summary and FTS metadata and associated history.
+A revision change replaces only that conversation's chunks. Duplicate IDs prefer
+the store with searchable text, then the most recent activity, with CLI winning
+ties. The scheduled index uses the same discovery path as a manual run.
+
+**Live JSONL sessions use append cursors.** Transcripts are append-only, and the one a
 session is writing changes between every pass; a long one runs to tens of MB and thousands of
 chunks. The cursor records the byte offset the last parse consumed (always the end of a complete
 line), a SHA-256 of every byte before it, the manifest row it was written with, and the session
@@ -270,7 +286,7 @@ vectors. `meta.embed_model` holds the *current* model — the one a query embeds
 ## `recall <query>` — search
 
 ```
-recall "QUERY" [--mode hybrid|semantic|lexical] [--source claude|codex]
+recall "QUERY" [--mode hybrid|semantic|lexical] [--source claude|codex|agy]
                [--project SUBSTR] [--since YYYY-MM-DD] [--limit N] [--model NAME] [--all] [--pretty]
 recall log [--limit N] [--pretty]              # recent searches from the query log
 ```
@@ -302,7 +318,7 @@ recall/
   internal/
     store/    SQLite open, schema, manifest, chunk CRUD, FTS + vector queries,
               sessions registry, pins, summaries, query log
-    adapter/  Record type; claude.go, codex.go; file discovery; interactive/exec mode
+    adapter/  Record type; claude.go, codex.go, agy.go; discovery and session modes
     embed/    Ollama client (batch embed + query embed, model-aware conditioning)
     index/    incremental orchestration + sessions-registry refresh
     search/   semantic + lexical + RRF fusion, result collapsing, Reranker hook
@@ -320,21 +336,24 @@ The design consequence worth recording: **the `sessions` registry is separate fr
 `chunks`.** Listing sessions must not require a reindex — a session that was created
 thirty seconds ago should appear in `recall list` immediately, and a search index is far
 too expensive to keep that fresh. So `RefreshSessions` reconciles one row per session file
-against disk on every `list`, keyed on `(mtime_ns, size)`, which means unchanged files cost
-a single `stat`. The chunk table is now purely a *search* artifact.
+against disk on every `list`. Unchanged JSONL files cost a single `stat`, and Antigravity
+uses its per-conversation revision and summary metadata. The chunk table is a *search*
+artifact.
 
 Two other decisions in this group:
 
 - **`summary --cached-only`** exists because a UI renders session metadata on every
   click. Generation calls `codex exec` (network, costs money), so the app must be able to
   ask "do you already have one?" without ever triggering a call. Cache validity is keyed
-  on the transcript's mtime, except in `--cached-only` mode, where staleness is ignored —
+  on the transcript's mtime or the Antigravity revision. In `--cached-only` mode,
+  staleness is ignored because
   an actively-growing session would otherwise look stale on every open.
 - **`resume` prints, never executes.** It emits the resume command as a JSON string. The
   command it emits carries `--dangerously-skip-permissions` (Claude) or
   `--dangerously-bypass-approvals-and-sandbox` (Codex) — appropriate for a deliberate
   human "put me back where I was", never for something a tool runs on your behalf. The
-  decision to run it stays with the caller.
+  decision to run it stays with the caller. For Antigravity it prints
+  `cd <workspace> && agy --conversation <id>` with shell-quoted arguments as needed.
 
 ---
 
@@ -348,8 +367,6 @@ Two other decisions in this group:
   revisit with a larger eval (see that doc's "What would make this conclusive").
 - Optional `--full` to print the matching transcript span.
 - Reranker stage (`bge-reranker-v2-m3`) — extension point already wired in `internal/search`.
-- Tests. There are none. Parsers, chunking, the search modes, and the migration path all
-  want them before this is trustworthy to change.
 - `sqlite-vec` (ANN) only if a corpus ever grows past what brute-force cosine handles
   comfortably — well north of 100k chunks. Not a problem today.
 
@@ -359,7 +376,7 @@ Both tools can keep curated **memory** files alongside raw transcripts
 (`~/.claude/projects/*/memory/*.md`, `~/.codex/memories/`). These are a distinct *kind* of
 content — curated, current, high signal-to-noise — and worth indexing next.
 
-Design — memory is just a **third adapter**, no new index or pipeline:
+Design — memory would be another adapter using the existing index and pipeline:
 - `adapter.Discover()` also walks the memory directories; a small `parseMemory` yields one
   Record per file (whole file = one chunk — they're small), `Source: "memory"`, project
   from the path, title from filename / first `#` heading. Incremental mtime indexing,

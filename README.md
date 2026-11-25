@@ -2,8 +2,8 @@
 
 You solved this before. Six weeks ago, in a session you can't find.
 
-Claude Code and Codex write every session to disk as JSONL and then give you no
-way to search it. `recall` indexes both tools into one local SQLite store and answers
+Claude Code, Codex, and Google Antigravity keep session history on disk.
+`recall` indexes it into one local SQLite store and answers
 natural-language or keyword queries from the terminal — hybrid **semantic + full-text**
 ranking, single Go binary, no cloud service in the retrieval path.
 
@@ -92,8 +92,8 @@ recall index                   # first run embeds everything — minutes, not se
 recall "that vector db tradeoff discussion" --pretty
 ```
 
-`recall index` is incremental: re-run it anytime and it only touches sessions whose
-files changed, and a session that only grew gets just its new messages embedded. The first
+`recall index` is incremental. It reindexes new and changed sessions, and embeds
+only the new messages when a Claude Code or Codex transcript grows. The first
 run is the slow one — it embeds your entire history. Only one `recall index` runs at a time;
 a second one exits with an error instead of waiting.
 
@@ -105,9 +105,9 @@ table. Progress, warnings, and notes go to **stderr**, so stdout stays clean JSO
 
 ### `recall index [--model NAME]`
 
-Reconciles the index with disk: new and changed session files are parsed, chunked
-(~512 tokens), embedded via Ollama, and written to `~/.config/recall/index.db`. Files
-deleted from disk are dropped from the index.
+Reconciles the index with disk. New and changed sessions are parsed, chunked
+(~512 tokens), embedded via Ollama, and written to `~/.config/recall/index.db`.
+Deleted sessions are dropped from the index.
 
 - `--model NAME` — embed with a specific Ollama model. Re-embeds **only** the files not
   already on that model, so switching models is incremental and resumable, not one big
@@ -142,7 +142,7 @@ Results are collapsed to **one row per session** (best-scoring chunk wins).
 |---|---|---|
 | `--mode hybrid\|semantic\|lexical` | `hybrid` | `semantic` = embeddings only; `lexical` = FTS5/BM25 keywords only; `hybrid` = both, merged with Reciprocal Rank Fusion. |
 | `--all` | off | Session-level AND: which session mentions *every* one of these words *somewhere* (even in different messages)? Pure lexical, no embeddings. |
-| `--source claude\|codex` | both | Restrict to one tool. |
+| `--source claude\|codex\|agy` | all | Restrict to one tool. |
 | `--project SUBSTR` | — | Substring match on the session's working directory. |
 | `--since YYYY-MM-DD` | — | Only sessions on/after this date. |
 | `--limit N` | `20` | Max results. |
@@ -151,8 +151,9 @@ Results are collapsed to **one row per session** (best-scoring chunk wins).
 | `--pretty` | off | Human table (`DATETIME · SOURCE · SESSION · PROJECT · TITLE`) instead of JSON. |
 
 Flags may appear **before or after** the query. JSON fields: `source, session_id,
-project, title, role, ts, path, score, snippet` — `path` is the transcript on disk, so
-an agent can open the matched session.
+project, title, role, ts, path, score, snippet`. For Antigravity, `path` is a
+`conversation_summaries.db#<conversation-id>` locator. Claude Code and Codex
+report the transcript file path.
 
 ```sh
 recall "how did I fix the pyexpat linking"
@@ -183,14 +184,13 @@ without a reindex**.
 ### `recall pin <session-id>` / `recall unpin <session-id>`
 
 Mark a session as pinned (surfaced first in the pinned group of a manager UI). `--source
-claude|codex` is auto-detected from the index if omitted. Purely local bookkeeping in the
+claude|codex|agy` is auto-detected from the index if omitted. Purely local bookkeeping in the
 `pins` table.
 
 ### `recall summary <session-id> [flags]`
 
 Generates a concise overview of a session — gist, key points, outcome, next steps — and
-caches it in the DB, keyed on the transcript's mtime (so it regenerates when the session
-grows).
+caches it in the DB. The cached summary is refreshed when the session changes.
 
 > ⚠️ **This command sends transcript content off your machine.** It renders the session
 > to plain text, caps it at **48,000 runes** (head + tail, middle elided), and pipes it
@@ -213,7 +213,7 @@ Requires an installed and authenticated `codex` CLI. Looked up on `PATH` and at
 Prints the command that would resume a session, plus its working directory, as JSON:
 `{source, session_id, cwd, command, path}`.
 
-> ⚠️ **The emitted command disables the agent's safety rails.** It is
+> ⚠️ **The Claude Code and Codex commands disable permission prompts.** They are
 > `claude --dangerously-skip-permissions --resume <id>` for Claude sessions and
 > `codex --dangerously-bypass-approvals-and-sandbox resume <id>` for Codex sessions —
 > flags that let the resumed agent read, write, and execute without prompting you.
@@ -222,6 +222,9 @@ Prints the command that would resume a session, plus its working directory, as J
 > you copy the command and run it yourself. If you'd rather resume with approvals intact,
 > drop the dangerous flag and run `claude --resume <id>` / `codex resume <id>` by hand.
 > If you pipe `recall resume` into a shell, you own that decision.
+
+Antigravity sessions print `cd <workspace> && agy --conversation <id>`, using
+your home directory when no workspace is recorded.
 
 ### `recall log [--limit N] [--pretty]`
 
@@ -268,7 +271,8 @@ Treat it as being as sensitive as the transcripts themselves. Its directory is c
 rm -rf ~/.config/recall     # index, query log, pins, summaries — all of it
 ```
 
-Deleting the index never touches your original transcripts in `~/.claude` / `~/.codex`.
+Deleting the index preserves the original sessions in `~/.claude`, `~/.codex`, and
+`~/.gemini`.
 
 ## What is and isn't indexed
 
@@ -277,10 +281,18 @@ roots, and `XDG_CONFIG_HOME` is not honored:
 - `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`
 - `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` and `~/.codex/archived_sessions/rollout-*.jsonl`
   (archived Codex sessions **are** indexed)
+- `~/.gemini/antigravity-cli/conversation_summaries.db` and
+  `~/.gemini/antigravity/conversation_summaries.db` for the CLI and desktop app,
+  respectively, with `history.jsonl` in each directory when available. Both use
+  `--source agy`.
 
 **Indexed:**
 - Claude: `user` and `assistant` messages — `text` blocks **and `thinking` blocks**.
 - Codex: `user` and `assistant` messages.
+- Antigravity: title, workspace, activity time, and user and agent text from
+  the summaries database and its FTS table. If a conversation has no FTS user
+  text, recall uses prompts linked by conversation ID in `history.jsonl`.
+  Sessions with only metadata still appear in `recall list`.
 
 **Not indexed:**
 - **Tool calls and tool results.** `tool_use` / `tool_result` blocks are explicitly
@@ -290,6 +302,7 @@ roots, and `XDG_CONFIG_HOME` is not honored:
 - Claude sub-agent transcripts (`<session-id>/subagents/agent-*.jsonl`) — they carry the
   parent's session id and would create duplicate rows.
 - Codex `logs_2.sqlite` (TRACE diagnostics) and legacy pre-2025 `.json` sessions.
+- Antigravity's per-conversation protobuf step payloads.
 
 **Indexed but hidden by default:** non-interactive runs (`codex exec`, `claude -p`/SDK).
 Pass `--include-exec` to search them or `--mode exec|all` to list them.
@@ -351,7 +364,7 @@ remote host means your content leaves the machine.
 **`index is empty — run 'recall index' first`**
 Semantic/hybrid search needs a model recorded in the DB, which only `recall index`
 writes. If `recall index` reported `0 sessions/files`, nothing was discovered — check that
-`~/.claude/projects` or `~/.codex/sessions` actually exist and contain `.jsonl` files.
+the source paths above exist and contain sessions.
 
 **Search returns nothing, but you know the session exists.**
 In order of likelihood: (1) it's a `codex exec`/headless run — add `--include-exec`;
@@ -380,7 +393,6 @@ happen automatically on open.
 - Reranker stage (`bge-reranker-v2-m3`) — the `Reranker` extension point is already wired
   in `internal/search`.
 - `--full` to print the matching transcript span.
-- Tests. There are none today; that's a gap, not a decision.
 
 ## Related
 
